@@ -31,7 +31,8 @@ if [ -n "${SAMPLE_FRAC:-}" ]; then
     DATA_ARGS+=(--sample_frac "$SAMPLE_FRAC")
 fi
 if [ -n "$TOKENIZED_DATASET" ]; then
-    DATA_ARGS=(--tokenized_dataset_path "$TOKENIZED_DATASET")
+    # We deliberately don't quote $TOKENIZED_DATASET here so multiple paths split on spaces
+    DATA_ARGS=(--tokenized_dataset_path $TOKENIZED_DATASET)
 fi
 
 accelerate launch \

@@ -13,7 +13,7 @@ __pycache__/
 
 ### runs
 sft/output/
-sft/tokenized_data/
+sft/data/
 
 ### flash_attn and build logs
 build_log*.txt

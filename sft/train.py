@@ -28,9 +28,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--tokenized_dataset_path",
         type=str,
+        nargs="+",
         default=None,
-        help="If set, load a pre-tokenized dataset from this path (datasets.load_from_disk) "
-        "instead of raw Nemotron-Terminal-Corpus.",
+        help="If set, load pre-tokenized dataset(s) from these paths. "
+        "Multiple paths will be concatenated.",
     )
 
     # Training
@@ -56,7 +57,13 @@ def main():
     grad_accum = args.global_batch_size // (args.num_gpus * args.per_device_train_batch_size)
 
     if getattr(args, "tokenized_dataset_path", None):
-        dataset = load_from_disk(args.tokenized_dataset_path)
+        if isinstance(args.tokenized_dataset_path, list) and len(args.tokenized_dataset_path) > 1:
+            from datasets import concatenate_datasets
+
+            dataset = concatenate_datasets([load_from_disk(p) for p in args.tokenized_dataset_path])
+        else:
+            path = args.tokenized_dataset_path[0] if isinstance(args.tokenized_dataset_path, list) else args.tokenized_dataset_path
+            dataset = load_from_disk(path)
     else:
         dataset = load_terminal_corpus(
             subsets=args.subsets,

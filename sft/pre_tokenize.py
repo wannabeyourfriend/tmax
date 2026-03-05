@@ -62,6 +62,20 @@ def parse_args() -> argparse.Namespace:
         help="If set, also compute assistant_masks matching TRL's assistant_only_loss behavior.",
     )
 
+    # Sharding
+    p.add_argument(
+        "--num_shards",
+        type=int,
+        default=None,
+        help="Number of shards to split the dataset into.",
+    )
+    p.add_argument(
+        "--shard_index",
+        type=int,
+        default=None,
+        help="Index of the shard to process.",
+    )
+
     return p.parse_args()
 
 
@@ -114,6 +128,9 @@ def main() -> None:
         seed=args.seed,
         cache_dir=args.cache_dir,
     )
+
+    if args.num_shards is not None and args.shard_index is not None:
+        dataset = dataset.shard(num_shards=args.num_shards, index=args.shard_index)
 
     # Normalize conversations/messages structure to ChatML-style messages.
     dataset = dataset.map(
