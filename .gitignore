@@ -1,0 +1,15 @@
+### Local uv environments
+.venv/
+
+### Packaging / build artifacts
+tmax.egg-info/
+build/
+dist/
+
+### Python cache files
+__pycache__/
+*.py[cod]
+
+
+### runs
+sft/output/
