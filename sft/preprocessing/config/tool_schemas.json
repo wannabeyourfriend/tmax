@@ -1,0 +1,31 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "bash",
+      "description": "Execute one or more commands in the persistent terminal session. The terminal state (working directory, environment variables, background processes, shell history) persists between calls. For multiple commands, separate with newlines. Special keystrokes like C-c (Ctrl+C) and C-d (Ctrl+D) are supported.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "The command(s) to execute. For multiple commands, separate with newlines."
+          }
+        },
+        "required": ["command"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "submit",
+      "description": "Submit the solution and mark the task as complete.",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  }
+]

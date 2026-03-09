@@ -5,7 +5,7 @@ from typing import Any
 from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer
 
-from data import load_terminal_corpus
+from data import load_converted_corpus
 
 from trl.data_utils import maybe_convert_to_chatml, truncate_dataset
 
@@ -23,19 +23,24 @@ def parse_args() -> argparse.Namespace:
 
     # Data loading
     p.add_argument(
-        "--subsets",
+        "--data_dir",
+        type=str,
+        default=None,
+        help="Directory containing converted Parquet files (default: preprocessing/output).",
+    )
+    p.add_argument(
+        "--sources",
         nargs="+",
         default=None,
-        help="Dataset subsets to use (default: all four, see data.ALL_SUBSETS).",
+        help="Source labels to include (e.g. 'nvidia/Nemotron-Terminal-Corpus/skill_based_easy').",
     )
     p.add_argument(
         "--sample_frac",
         type=float,
         default=None,
-        help="Optional sub-sample fraction per subset (same semantics as train.py).",
+        help="Optional sub-sample fraction of the loaded dataset.",
     )
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--cache_dir", type=str, default=None)
 
     # Tokenization / truncation
     p.add_argument(
@@ -122,11 +127,11 @@ def main() -> None:
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
 
-    dataset: Dataset = load_terminal_corpus(
-        subsets=args.subsets,
+    dataset: Dataset = load_converted_corpus(
+        data_dir=args.data_dir,
+        sources=args.sources,
         sample_frac=args.sample_frac,
         seed=args.seed,
-        cache_dir=args.cache_dir,
     )
 
     if args.num_shards is not None and args.shard_index is not None:

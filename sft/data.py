@@ -1,100 +1,99 @@
-from fnmatch import fnmatch
+"""Data loading for SFT training.
 
-import pyarrow as pa
-import pyarrow.parquet as pq
-from datasets import Dataset, concatenate_datasets
-from datasets.table import InMemoryTable
-from huggingface_hub import HfApi, hf_hub_download
+Loads pre-processed (converted) data from the preprocessing pipeline output.
+The converted Parquet files contain ``messages`` (SWE-agent format),
+``source`` (provenance label), and ``metadata`` columns.
 
-REPO_ID = "nvidia/Nemotron-Terminal-Corpus"
+This module injects the ``tools`` column (constant tool schemas for ``bash``
+and ``submit``) so that ``pre_tokenize.py`` can pass them to
+``apply_chat_template(tools=...)``.
+"""
 
-ALL_SUBSETS = [
-    "dataset_adapters",
-    "skill_based_easy",
-    "skill_based_medium",
-    "skill_based_mixed",
-]
+from __future__ import annotations
 
-SUBSET_PATTERNS = {
-    "dataset_adapters": "dataset_adapters/*.parquet",
-    "skill_based_easy": "synthetic_tasks/skill_based/easy/*/data_filtered.parquet",
-    "skill_based_medium": "synthetic_tasks/skill_based/medium/*/data_filtered.parquet",
-    "skill_based_mixed": "synthetic_tasks/skill_based/mixed/*/data_filtered.parquet",
-}
+import json
+from pathlib import Path
 
-TRAIN_COLUMNS = {"messages"}
+from datasets import Dataset, concatenate_datasets, load_dataset
+
+from preprocessing.convert import get_tool_schemas
+
+_DEFAULT_DATA_DIR = Path(__file__).resolve().parent / "preprocessing" / "output"
+
+TRAIN_COLUMNS = {"messages", "tools"}
 
 
-def _resolve_parquet_paths(subset: str) -> list[str]:
-    """Return the Hub-relative paths of parquet files for *subset*."""
-    pattern = SUBSET_PATTERNS[subset]
-    all_files = HfApi().list_repo_files(REPO_ID, repo_type="dataset")
-    paths = sorted(f for f in all_files if fnmatch(f, pattern))
-    if not paths:
-        raise FileNotFoundError(
-            f"No parquet files matching '{pattern}' for subset '{subset}' in {REPO_ID}"
-        )
-    return paths
-
-
-def _ensure_downloaded(paths: list[str], cache_dir: str | None = None) -> list[str]:
-    """Download *paths* from the Hub (cached after first call) and return local paths."""
-    return [
-        hf_hub_download(REPO_ID, p, repo_type="dataset", cache_dir=cache_dir)
-        for p in paths
-    ]
-
-#* Hacky way to download and read parquet files from large terminal data repository.
-def _read_parquet_files(local_paths: list[str]) -> pa.Table:
-    """Read parquet files into a single Arrow table.
-
-    Uses ``ParquetFile.iter_batches`` (the C++ FileReader path) with a small
-    batch size so that nested columns never exceed pyarrow's single-array size
-    limit -- avoiding the ``ArrowNotImplementedError: Nested data conversions
-    not implemented for chunked array outputs`` bug.
-    """
-    batches: list[pa.RecordBatch] = []
-    for path in local_paths:
-        pf = pq.ParquetFile(path)
-        batches.extend(pf.iter_batches(batch_size=1024, columns=["conversations"]))
-    return pa.Table.from_batches(batches)
-
-
-def load_terminal_corpus(
-    subsets: list[str] | None = None,
+def load_converted_corpus(
+    data_dir: str | Path | None = None,
+    sources: list[str] | None = None,
     sample_frac: float | None = None,
     seed: int = 42,
-    cache_dir: str | None = None,
 ) -> Dataset:
-    """Load and prepare Nemotron-Terminal-Corpus for SFT training.
+    """Load converted SWE-agent format data for SFT training.
 
-    Args:
-        subsets: Which subsets to include (default: all four).
-        sample_frac: If set, randomly sample this fraction from each subset.
-        seed: Random seed used for sub-sampling.
-        cache_dir: Override the HuggingFace cache directory.
+    Parameters
+    ----------
+    data_dir : path
+        Directory containing the Parquet files produced by the conversion
+        pipeline (default: ``sft/preprocessing/output``).
+    sources : list[str] | None
+        Source labels to include (e.g.
+        ``["nvidia/Nemotron-Terminal-Corpus/skill_based_easy"]``).
+        If ``None``, all Parquet files in *data_dir* are loaded.
+    sample_frac : float | None
+        If set, randomly sub-sample this fraction of the final dataset.
+    seed : int
+        Random seed for sub-sampling.
 
-    Returns:
-        A single HF Dataset with a ``messages`` column ready for TRL.
+    Returns
+    -------
+    Dataset with ``messages`` and ``tools`` columns, ready for tokenization.
     """
-    if subsets is None:
-        subsets = list(ALL_SUBSETS)
+    if data_dir is None:
+        data_dir = _DEFAULT_DATA_DIR
+    data_dir = Path(data_dir)
 
-    parts: list[Dataset] = []
-    for name in subsets:
-        hub_paths = _resolve_parquet_paths(name)
-        local_paths = _ensure_downloaded(hub_paths, cache_dir)
-        table = _read_parquet_files(local_paths)
-        ds = Dataset(InMemoryTable(table))
+    parquet_files = sorted(data_dir.glob("*.parquet"))
+    if not parquet_files:
+        raise FileNotFoundError(
+            f"No .parquet files found in {data_dir}.  "
+            "Run the conversion pipeline first: python -m preprocessing.pipeline"
+        )
 
-        if sample_frac is not None and 0 < sample_frac < 1:
-            n = max(1, int(len(ds) * sample_frac))
-            ds = ds.shuffle(seed=seed).select(range(n))
+    ds = load_dataset(
+        "parquet",
+        data_files=[str(p) for p in parquet_files],
+        split="train",
+    )
 
-        ds = ds.rename_column("conversations", "messages")
-        drop = [c for c in ds.column_names if c not in TRAIN_COLUMNS]
+    # Filter by source label if requested
+    if sources is not None:
+        source_set = set(sources)
+        ds = ds.filter(
+            lambda row: row["source"] in source_set,
+            desc="Filtering by source",
+        )
+
+    # Sub-sample
+    if sample_frac is not None and 0 < sample_frac < 1:
+        n = max(1, int(len(ds) * sample_frac))
+        ds = ds.shuffle(seed=seed).select(range(n))
+
+    # Inject constant tools column
+    tool_schemas = get_tool_schemas()
+    tool_schemas_str = json.dumps(tool_schemas)
+    ds = ds.map(
+        lambda row: {"tools": tool_schemas_str},
+        desc="Injecting tool schemas",
+    )
+
+    # Keep only training-relevant columns
+    drop = [c for c in ds.column_names if c not in TRAIN_COLUMNS]
+    if drop:
         ds = ds.remove_columns(drop)
-        parts.append(ds)
 
-    dataset = concatenate_datasets(parts)
-    return dataset
+    return ds
+
+
+# Backward-compat alias
+load_terminal_corpus = load_converted_corpus

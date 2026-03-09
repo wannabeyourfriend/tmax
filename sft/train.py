@@ -6,7 +6,7 @@ from datasets import load_from_disk
 from transformers import AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-from data import load_terminal_corpus
+from data import load_converted_corpus
 
 
 class SFTTrainerSP(SFTTrainer):
@@ -83,14 +83,19 @@ def parse_args() -> argparse.Namespace:
 
     # Data
     p.add_argument(
-        "--subsets",
+        "--data_dir",
+        type=str,
+        default=None,
+        help="Directory containing converted Parquet files (default: preprocessing/output).",
+    )
+    p.add_argument(
+        "--sources",
         nargs="+",
         default=None,
-        help="Dataset subsets to use (default: all four)",
+        help="Source labels to include from converted data.",
     )
-    p.add_argument("--sample_frac", type=float, default=None, help="Sub-sample fraction per subset")
+    p.add_argument("--sample_frac", type=float, default=None, help="Sub-sample fraction")
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--cache_dir", type=str, default=None)
     p.add_argument("--dataset_num_proc", type=int, default=8)
     p.add_argument(
         "--tokenized_dataset_path",
@@ -169,11 +174,11 @@ def main():
             path = args.tokenized_dataset_path[0] if isinstance(args.tokenized_dataset_path, list) else args.tokenized_dataset_path
             dataset = load_from_disk(path)
     else:
-        dataset = load_terminal_corpus(
-            subsets=args.subsets,
+        dataset = load_converted_corpus(
+            data_dir=args.data_dir,
+            sources=args.sources,
             sample_frac=args.sample_frac,
             seed=args.seed,
-            cache_dir=args.cache_dir,
         )
 
     training_args = SFTConfig(

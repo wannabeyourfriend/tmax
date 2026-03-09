@@ -1,0 +1,24 @@
+sources:
+  - name: "open-thoughts/OpenThoughts-Agent-v1-SFT"
+    type: huggingface
+    conversations_column: "conversations"
+    subsets:
+      - subset: null
+        source_label: "open-thoughts/OpenThoughts-Agent-v1-SFT"
+
+  - name: "nvidia/Nemotron-Terminal-Corpus"
+    type: huggingface_parquet
+    conversations_column: "conversations"
+    subsets:
+      - subset: "dataset_adapters"
+        pattern: "dataset_adapters/*.parquet"
+        source_label: "nvidia/Nemotron-Terminal-Corpus/dataset_adapters"
+      - subset: "skill_based_easy"
+        pattern: "synthetic_tasks/skill_based/easy/*/data_filtered.parquet"
+        source_label: "nvidia/Nemotron-Terminal-Corpus/skill_based_easy"
+      - subset: "skill_based_medium"
+        pattern: "synthetic_tasks/skill_based/medium/*/data_filtered.parquet"
+        source_label: "nvidia/Nemotron-Terminal-Corpus/skill_based_medium"
+      - subset: "skill_based_mixed"
+        pattern: "synthetic_tasks/skill_based/mixed/*/data_filtered.parquet"
+        source_label: "nvidia/Nemotron-Terminal-Corpus/skill_based_mixed"
