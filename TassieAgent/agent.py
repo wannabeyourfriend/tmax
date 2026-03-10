@@ -46,7 +46,9 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
 
 SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
-SYSTEM_PROMPT = """\
+_STATE_DIR = "/tmp/.tassie"
+
+SYSTEM_PROMPT_STATELESS = """\
 You are a helpful coding assistant. You have access to a bash terminal.
 Use it to explore the codebase, understand the problem, implement a solution, and verify it works.
 
@@ -63,11 +65,50 @@ Use `cd /path && <command>` to run commands in a specific directory.
 - After submitting you cannot continue working on the task.
 """
 
-BASH_TOOL = {
+SYSTEM_PROMPT_PERSISTENT = """\
+You are a helpful coding assistant. You have access to a persistent bash terminal.
+Use it to explore the codebase, understand the problem, implement a solution, and verify it works.
+
+IMPORTANT RULES:
+- Every response must include a THOUGHT section explaining your reasoning, followed by exactly one bash command.
+- Your working directory and environment variables persist between commands. \
+You can `cd` into a directory and subsequent commands will run there. \
+You can `export` variables and they will be available in later commands.
+- Edit files using bash commands like `sed`, `cat > file << 'EOF'`, etc.
+- Long running commands: Wrap with `timeout`, e.g., `timeout 10 <command>`.
+- Interactive commands are not possible. Use `yes`/`no`, etc. as appropriate.
+- Output may be truncated. Use `head`/`tail`/`grep` to filter large outputs.
+- When you are confident your solution is correct, submit by running: \
+`echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+- After submitting you cannot continue working on the task.
+"""
+
+BASH_TOOL_STATELESS = {
     "type": "function",
     "function": {
         "name": "bash",
         "description": "Execute a bash command. Each command runs in a new subshell.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The bash command to execute.",
+                },
+            },
+            "required": ["command"],
+        },
+    },
+}
+
+BASH_TOOL_PERSISTENT = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": (
+            "Execute a bash command in a persistent shell. "
+            "Working directory and environment variables are preserved between calls."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
@@ -96,16 +137,21 @@ class TassieAgent(BaseAgent):
         logs_dir: Path,
         model_name: str | None = None,
         max_steps: int = 30,
-        cost_limit: float = 3.0,
+        cost_limit: float = 0.0,
+        persistent_bash: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
         self.max_steps = max_steps
         self.cost_limit = cost_limit
         self.cost: float = 0.0
+        self.persistent_bash = persistent_bash
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        pass
+        if self.persistent_bash:
+            await environment.exec(
+                f"mkdir -p {_STATE_DIR} && pwd > {_STATE_DIR}/cwd && export -p > {_STATE_DIR}/env"
+            )
 
     async def run(
         self,
@@ -113,9 +159,11 @@ class TassieAgent(BaseAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
-        model = self.model_name or "anthropic/claude-sonnet-4-20250514"
+        model = self.model_name or "anthropic/claude-haiku-4-5"
+        system_prompt = SYSTEM_PROMPT_PERSISTENT if self.persistent_bash else SYSTEM_PROMPT_STATELESS
+        bash_tool = BASH_TOOL_PERSISTENT if self.persistent_bash else BASH_TOOL_STATELESS
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": instruction},
         ]
 
@@ -127,7 +175,7 @@ class TassieAgent(BaseAgent):
                     logger.warning(f"Cost limit reached: ${self.cost:.2f} >= ${self.cost_limit:.2f}")
                     break
 
-                response = await self._query_with_retry(model, messages)
+                response = await self._query_with_retry(model, messages, bash_tool)
 
                 try:
                     step_cost = litellm.completion_cost(response, model=model)
@@ -152,7 +200,7 @@ class TassieAgent(BaseAgent):
                     output = await self._execute_bash(command, environment)
 
                     # Check for submit marker
-                    if output.startswith(SUBMIT_MARKER):
+                    if SUBMIT_MARKER in output:
                         done = True
 
                     messages.append({"role": "tool", "tool_call_id": tc["id"], "content": _truncate(output)})
@@ -163,11 +211,12 @@ class TassieAgent(BaseAgent):
             # Always save trajectory, even on error
             (self.logs_dir / "trajectory.json").write_text(json.dumps(messages, indent=2, default=str))
 
-    async def _query_with_retry(self, model: str, messages: list[dict[str, Any]]) -> Any:
+    async def _query_with_retry(self, model: str, messages: list[dict[str, Any]], bash_tool: dict[str, Any]) -> Any:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
+                temperature = 1.0 if "gpt-5" in model else 0.7
                 return await litellm.acompletion(
-                    model=model, messages=messages, tools=[BASH_TOOL], temperature=0.7, top_p=0.95,
+                    model=model, messages=messages, tools=[bash_tool], temperature=temperature,
                 )
             except ABORT_EXCEPTIONS as e:
                 logger.error(f"Aborting: {type(e).__name__}: {e}")
@@ -180,7 +229,22 @@ class TassieAgent(BaseAgent):
                 logger.warning(f"Retry {attempt}/{MAX_RETRIES} after {type(e).__name__}: {e} (waiting {delay:.0f}s)")
                 await asyncio.sleep(delay)
 
+    @staticmethod
+    def _wrap_command(command: str) -> str:
+        """Wrap a command to restore and save shell state (cwd + env vars)."""
+        return (
+            f'cd "$(cat {_STATE_DIR}/cwd)" 2>/dev/null\n'
+            f". {_STATE_DIR}/env 2>/dev/null\n"
+            f"{command}\n"
+            f"_tassie_ec=$?\n"
+            f"pwd > {_STATE_DIR}/cwd\n"
+            f"export -p > {_STATE_DIR}/env\n"
+            f"exit $_tassie_ec"
+        )
+
     async def _execute_bash(self, command: str, env: BaseEnvironment) -> str:
+        if self.persistent_bash:
+            command = self._wrap_command(command)
         result = await env.exec(command=command)
         output = result.stdout or ""
         if result.stderr:
