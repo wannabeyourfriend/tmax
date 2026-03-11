@@ -119,6 +119,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--logging_steps", type=float, default=0.01, help="<1 = ratio of total steps")
     p.add_argument("--save_steps", type=float, default=0.05, help="<1 = ratio of total steps")
     p.add_argument("--packing", action="store_true", default=False)
+    p.add_argument(
+        "--max_train_samples",
+        type=int,
+        default=None,
+        help="If set, subsample the training dataset to this many examples (uses --seed for reproducibility).",
+    )
 
     return p.parse_args()
 
@@ -180,6 +186,9 @@ def main():
             sample_frac=args.sample_frac,
             seed=args.seed,
         )
+
+    if args.max_train_samples is not None and args.max_train_samples < len(dataset):
+        dataset = dataset.shuffle(seed=args.seed).select(range(args.max_train_samples))
 
     training_args = SFTConfig(
         output_dir=args.output_dir,

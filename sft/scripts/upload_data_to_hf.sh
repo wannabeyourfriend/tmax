@@ -17,9 +17,9 @@ cd "$(dirname "$0")/.."
 #   - huggingface-cli login  (or HF_TOKEN env var)
 #   - Python with datasets + huggingface_hub in PATH
 
-REPO_ID="${HF_REPO:-osieosie/tmax-sft-preview}"
-INPUT_DIR="preprocessing/terminus2_sweagent_1pct"
-PRIVATE="true"
+REPO_ID="osieosie/tmax-sft-full-20260310"
+INPUT_DIR="/gpfs/scrubbed/osey/tmax/sft/output/preprocessing/terminus2_sweagent_full_20260310"
+PRIVATE="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

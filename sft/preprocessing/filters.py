@@ -55,6 +55,11 @@ def apply_mandatory_filters(
         v.drop_reason = "no_task_complete"
         return v
 
+    if meta.get("has_ctrl_c", False):
+        v.keep = False
+        v.drop_reason = "contains_ctrl_c"
+        return v
+
     return v
 
 

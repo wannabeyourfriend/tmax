@@ -16,6 +16,7 @@ from preprocessing.builders import (
     build_submit_messages,
     build_tool_calls,
     build_tool_result,
+    is_harness_error,
 )
 
 _CONFIG_DIR = Path(__file__).resolve().parent / "config"
@@ -77,7 +78,7 @@ def convert_trace(
         )
 
     # ------------------------------------------------------------------
-    # 1. Parse message 0
+    # 1. Parse message 0 — extract task description, discard terminal state
     # ------------------------------------------------------------------
     content0 = messages[0]["content"]
 
@@ -89,10 +90,8 @@ def convert_trace(
 
     if STATE_DELIM in remainder:
         task_description = remainder[: remainder.index(STATE_DELIM)].strip()
-        terminal_state = remainder[remainder.index(STATE_DELIM):].strip()
     else:
         task_description = remainder.strip()
-        terminal_state = ""
         warnings.append("STATE_DELIM not found in message 0")
 
     # ------------------------------------------------------------------
@@ -101,11 +100,7 @@ def convert_trace(
     converted: list[dict] = [
         {"role": "system", "content": _get_system_prompt()},
     ]
-
-    first_user = task_description
-    if terminal_state:
-        first_user += "\n\n" + terminal_state
-    converted.append({"role": "user", "content": first_user})
+    converted.append({"role": "user", "content": task_description})
 
     # ------------------------------------------------------------------
     # 3. Walk (assistant, user) pairs
@@ -117,6 +112,8 @@ def convert_trace(
     }
     json_failed = False
     has_task_complete = False
+    has_ctrl_c = False
+    pending_reasoning = ""
 
     while i < len(messages):
         msg = messages[i]
@@ -144,7 +141,56 @@ def convert_trace(
 
         tool_calls = build_tool_calls(parsed, conversation_id, turn_index)
 
-        # --- Assistant message ---
+        # Track C-c usage
+        if tool_calls:
+            cmd = tool_calls[0]["function"]["arguments"].get("command", "")
+            if "C-c" in cmd:
+                has_ctrl_c = True
+
+        # --- Handle tool result (check for harness errors) ---
+        next_is_user = (
+            (i + 1) < len(messages) and messages[i + 1].get("role") == "user"
+        )
+
+        if tool_calls and next_is_user:
+            raw_tool_content = messages[i + 1]["content"]
+
+            if is_harness_error(raw_tool_content):
+                # Drop the entire turn — the harness rejected the JSON and
+                # likely did not execute the command.  Skip both assistant
+                # and user messages.
+                warnings.append(f"Harness error at index {i+1}, dropping turn")
+                i += 2
+                turn_index += 1
+                pending_reasoning = ""
+                continue
+
+            tool_result = build_tool_result(raw_tool_content, tool_calls[0]["id"])
+            i += 2
+        elif tool_calls:
+            warnings.append(
+                f"Assistant at index {i} has commands but no following user message"
+            )
+            tool_result = None
+            i += 1
+        else:
+            tool_result = None
+            i += 1
+
+        # --- Reasoning-only assistant: buffer instead of emitting ---
+        if not tool_calls:
+            pending_reasoning = (
+                (pending_reasoning + "\n\n" + reasoning).strip()
+                if pending_reasoning else reasoning
+            )
+            turn_index += 1
+            continue
+
+        # --- Emit assistant message (flush any buffered reasoning) ---
+        if pending_reasoning:
+            reasoning = (pending_reasoning + "\n\n" + reasoning).strip()
+            pending_reasoning = ""
+
         assistant_msg: dict = {"role": "assistant", "content": ""}
         if reasoning:
             assistant_msg["reasoning_content"] = reasoning
@@ -152,21 +198,15 @@ def convert_trace(
             assistant_msg["tool_calls"] = tool_calls
         converted.append(assistant_msg)
 
-        # --- Corresponding tool result ---
-        if tool_calls and (i + 1) < len(messages) and messages[i + 1].get("role") == "user":
-            tool_result = build_tool_result(messages[i + 1]["content"], tool_calls[0]["id"])
+        if tool_result is not None:
             converted.append(tool_result)
-            i += 2
-        elif tool_calls:
-            warnings.append(f"Assistant at index {i} has commands but no following user message")
-            i += 1
-        else:
-            i += 1
 
         # --- Submit (truncate at first submit) ---
         if parsed.get("task_complete", False):
             has_task_complete = True
-            submit_msgs = build_submit_messages(parsed, conversation_id, turn_index, reasoning)
+            submit_msgs = build_submit_messages(
+                parsed, conversation_id, turn_index, reasoning,
+            )
             converted.extend(submit_msgs)
             turn_index += 1
             break
@@ -189,6 +229,7 @@ def convert_trace(
         "json_strategy_counts": strategy_counts,
         "json_extraction_failed": json_failed,
         "has_task_complete": has_task_complete,
+        "has_ctrl_c": has_ctrl_c,
     }
 
     return {

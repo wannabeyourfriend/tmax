@@ -16,10 +16,10 @@ cd "$(dirname "$0")/.."
 # Output: output/preprocessing/terminus2_sweagent/
 
 NUM_WORKERS="$(nproc)"
-OUTPUT_DIR="output/preprocessing/terminus2_sweagent_full_20260309"
+OUTPUT_DIR="output/preprocessing/terminus2_sweagent_full_20260310_v2"
 MAX_TURNS=999
 NUM_EXAMPLES=3
-HF_REPO="osieosie/tmax-sft"
+HF_REPO="osieosie/tmax-sft-full-20260310-v2"
 UPLOAD=false
 UPLOAD_FLAGS=""
 

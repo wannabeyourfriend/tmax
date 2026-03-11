@@ -84,13 +84,36 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _adapt_messages(messages: list[dict], tokenizer) -> list[dict]:
+    """Ensure reasoning_content reaches the tokenized output.
+
+    If the chat template handles ``reasoning_content`` natively (e.g. Qwen3.5),
+    return messages unchanged.  Otherwise merge it into ``content`` wrapped in
+    ``<think>...</think>`` tags so models whose vocab includes those tokens
+    (e.g. Qwen3-4B-Instruct-2507) still learn to reason.
+    """
+    template = getattr(tokenizer, "chat_template", "") or ""
+    if "reasoning_content" in template:
+        return messages
+    adapted = []
+    for msg in messages:
+        if msg.get("reasoning_content") and msg.get("role") == "assistant":
+            msg = dict(msg)
+            reasoning = msg.pop("reasoning_content")
+            content = msg.get("content", "") or ""
+            thinking = f"<think>\n{reasoning}\n</think>"
+            msg["content"] = f"{thinking}\n\n{content}".strip()
+        adapted.append(msg)
+    return adapted
+
+
 def _tokenize_messages_example(
     example: dict[str, Any],
     tokenizer,
     assistant_only_loss: bool,
 ) -> dict[str, Any]:
     """Tokenize a single example containing a ChatML-style `messages` field."""
-    messages = example["messages"]
+    messages = _adapt_messages(example["messages"], tokenizer)
 
     tools = example.get("tools")
     if isinstance(tools, str):

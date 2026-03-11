@@ -177,6 +177,25 @@ def build_submit_messages(
 
 
 # ---------------------------------------------------------------------------
+# Harness error detection
+# ---------------------------------------------------------------------------
+
+_HARNESS_ERROR_MARKERS = (
+    "ERROR: No valid JSON found",
+    "No valid JSON found in response",
+    "No valid JSON object found",
+)
+
+
+def is_harness_error(user_content: str) -> bool:
+    """Return True if the user message is a harness JSON-parsing error
+    rather than real terminal output.  These messages are injected by the
+    Nemotron harness when the agent's response could not be parsed as JSON.
+    """
+    return any(marker in user_content for marker in _HARNESS_ERROR_MARKERS)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
