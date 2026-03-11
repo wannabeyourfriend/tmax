@@ -163,11 +163,13 @@ def convert_trace(
         else:
             i += 1
 
-        # --- Submit ---
+        # --- Submit (truncate at first submit) ---
         if parsed.get("task_complete", False):
             has_task_complete = True
-        submit_msgs = build_submit_messages(parsed, conversation_id, turn_index, reasoning)
-        converted.extend(submit_msgs)
+            submit_msgs = build_submit_messages(parsed, conversation_id, turn_index, reasoning)
+            converted.extend(submit_msgs)
+            turn_index += 1
+            break
 
         turn_index += 1
 

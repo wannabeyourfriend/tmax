@@ -7,6 +7,14 @@ Every function is deterministic and side-effect-free.
 from __future__ import annotations
 
 import hashlib
+import re
+
+_SHELL_PROMPT_RE = re.compile(
+    r"(?:\([^)]+\)\s+)?"          # optional venv prefix like (venv)
+    r"(?:root|[\w]+)"             # username
+    r"@[\w][\w.-]{6,}"           # @hostname (UUID or long hostname, >=7 chars)
+    r":[^\n#$]*[#$]\s?"          # :/path# or :/path$
+)
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +100,9 @@ def build_tool_result(user_content: str, tool_call_id: str) -> dict:
     """Convert a Terminus-2 user message (terminal output) into a tool result.
 
     Strips harness framing (``Current terminal state:``, ``New Terminal
-    Output:``, the "Are you sure?" confirmation prompt) and trailing blank
-    lines from the 40-line terminal buffer.  Returns flat-string ``content``
-    for Qwen3.5 compatibility.
+    Output:``, the "Are you sure?" confirmation prompt), container shell
+    prompts (``root@<uuid>:/path#``), and trailing blank lines.
+    Returns flat-string ``content`` for Qwen3.5 compatibility.
     """
     text = user_content
 
@@ -110,7 +118,11 @@ def build_tool_result(user_content: str, tool_call_id: str) -> dict:
     if confirmation in text:
         text = text[: text.index(confirmation)]
 
-    text = text.rstrip()
+    text = _SHELL_PROMPT_RE.sub("", text)
+
+    # Collapse runs of blank lines left after prompt stripping
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
 
     return {
         "role": "tool",
