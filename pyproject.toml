@@ -12,7 +12,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["sft", "TassieAgent"]
+packages = ["sft", "TassieAgent", "rl_data", "rl_data.generator"]
 
 [tool.uv.extra-build-dependencies]
 flash-attn = ["torch"]
@@ -32,4 +32,11 @@ sft = [
     "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.8cxx11abiTRUE-cp313-cp313-linux_x86_64.whl",
     "flash-linear-attention>=0.4.1",
     "deepspeed>=0.18.7",
+]
+rl_data = [
+    "litellm",
+    "pydantic",
+    "tenacity",
+    "tqdm",
+    "datasets",
 ]
