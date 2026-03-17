@@ -16,8 +16,8 @@ cd "$(dirname "$0")/.."
 #   - huggingface-cli login  (or HF_TOKEN env var)
 #   - Python with huggingface_hub in PATH
 
-MODEL_DIR="/gpfs/scrubbed/osey/tmax/sft/output/Qwen3.5-4B_tbmax_terminus2_sweagent_full_20260310_v2_qwen3.5_42"
-REPO_ID="osieosie/tmax-qwen3.5-4b-sft-20260313"
+MODEL_DIR="/gpfs/scrubbed/osey/tmax/sft/output/Qwen3-4B-Instruct-2507_tbmax_terminus2_sweagent_full_20260315_qwen3_asst_loss_42_n100000"
+REPO_ID="osieosie/tmax-qwen3-4b-sft-20260316-100k-asst-loss"
 PRIVATE="false"
 
 while [[ $# -gt 0 ]]; do

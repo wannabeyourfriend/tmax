@@ -9,6 +9,8 @@ from pathlib import Path
 
 from rl_data import chat_completion_batch, DEFAULT_MODEL
 
+
+# some sort of way to make the tasks harder.
 SYSTEM_MSG = """You are creating realistic Linux-terminal tasks for training an AI agent.
 
 Respond in xml format.
@@ -59,6 +61,7 @@ Guidelines:
 # below, providing a broad variety of task prompts.
 
 # --- Task inspiration for diversity ---
+# Match with skills
 TASK_CATEGORIES = [
     "file and directory management",
     "text processing and manipulation",
@@ -124,16 +127,28 @@ TASK_CATEGORIES = [
     "optimization solvers"
 ]
 
-COMPLEXITY_LEVELS = [
-    "simple single terminal command",
-    "simple set of 2-3 commands",
-    "simple set of 3-4 commands",
-    "multi-step sequential commands",
-    "multi-step parallel commands",
-    "set of 5-10 commands"
+
+## Simple leve o
+COMPLEXITY_LEVELS_1 = [
+    # 1 command -> simple single terminal command
+    # 2-5 commands -> multi-step sequential
+    # 5-10 commands
+    # 10+ commands
+    # must involve 
 ]
 
 
+## Complexity level of the command only: BASH only, BASH AND CODE, etc.
+COMPLEXITY_LEVELS_2= [
+    # 1 command -> simple single terminal command
+    # 2-5 commands -> multi-step sequential
+    # 5-10 commands
+    # 10+ commands
+    # must involve 
+]
+
+
+# persona
 SCENARIO_CONTEXTS = [
     "developer organizing project files",
     "system administrator maintaining servers",

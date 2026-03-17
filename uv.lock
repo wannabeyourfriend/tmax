@@ -3716,6 +3716,7 @@ dependencies = [
 rl-data = [
     { name = "datasets" },
     { name = "litellm" },
+    { name = "matplotlib" },
     { name = "pydantic" },
     { name = "tenacity" },
     { name = "tqdm" },
@@ -3748,6 +3749,7 @@ requires-dist = [
     { name = "litellm" },
     { name = "litellm", marker = "extra == 'rl-data'" },
     { name = "matplotlib", specifier = ">=3.10.8" },
+    { name = "matplotlib", marker = "extra == 'rl-data'" },
     { name = "pyarrow", marker = "extra == 'sft'", specifier = ">=23.0.1" },
     { name = "pydantic", marker = "extra == 'rl-data'" },
     { name = "tenacity", marker = "extra == 'rl-data'" },
