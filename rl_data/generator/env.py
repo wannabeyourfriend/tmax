@@ -590,7 +590,10 @@ class InteractiveContainerEnvironment:
             return False
 
         q = shlex.quote(str(test_path))
-        test_success, test_output = self.exec(f"pytest -q {q}")
+        rootdir = shlex.quote(str(self.temp_dir))
+        test_success, test_output = self.exec(
+            f"pytest -q --rootdir={rootdir} --override-ini='collect_ignore_glob=[]' {q}"
+        )
         self.exec(f"rm -f {q}")
 
         if not test_success:
@@ -617,7 +620,10 @@ class InteractiveContainerEnvironment:
             return False, write_out
 
         q = shlex.quote(str(test_path))
-        test_success, test_output = self.exec(f"pytest -q {q}")
+        rootdir = shlex.quote(str(self.temp_dir))
+        test_success, test_output = self.exec(
+            f"pytest -q --rootdir={rootdir} --override-ini='collect_ignore_glob=[]' {q}"
+        )
         self.exec(f"rm -f {q}")
 
         if self.verbose:

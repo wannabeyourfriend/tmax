@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -48,6 +49,10 @@ class SolutionConfig:
     command_log_dir: Optional[str] = None
     #: If set, copy everything printed to stdout/stderr (terminal) into this file (append).
     terminal_log: Optional[str] = None
+    #: Concurrency limit for the SIF build pre-pass (default 1 = serial; safe for shared cache).
+    build_workers: int = 1
+    #: Retries per SIF build (with exponential backoff). Transient failures are common under load.
+    build_retries: int = 3
 
 
 class _TeeTextStream:
@@ -75,37 +80,67 @@ class _TeeTextStream:
         return self._primary.fileno()
 
 
+def _patch_def_chmod(def_path: Path) -> None:
+    """Ensure ``chmod 755 /home/user`` is present in the %post section."""
+    with open(def_path, "r") as f:
+        def_text = f.read()
+    if "chmod 755 /home/user" in def_text:
+        return
+    section_headers = [line for line in def_text.split("\n") if line.strip().startswith("%")]
+    post_idx = [i for i, line in enumerate(section_headers) if "post" in line.lower()]
+    if post_idx:
+        idx = post_idx[0]
+        if idx + 1 < len(section_headers):
+            next_header = section_headers[idx + 1]
+            def_text = def_text.replace(
+                next_header, "    chmod 755 /home/user\n" + next_header
+            )
+        else:
+            def_text = def_text.rstrip() + "\n    chmod 755 /home/user\n"
+        with open(def_path, "w") as f:
+            f.write(def_text)
+
+
+def build_sif(
+    sif_path: Path,
+    def_path: Path,
+    *,
+    retries: int = 3,
+    timeout: int = 300,
+    verbose: bool = False,
+) -> tuple[bool, str]:
+    """Build a SIF from a .def with retries and exponential backoff.
+
+    Returns (success, error_message_or_empty).
+    """
+    _patch_def_chmod(def_path)
+    for attempt in range(1, retries + 1):
+        proc = subprocess.run(
+            ["apptainer", "build", "--force", str(sif_path), str(def_path)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if proc.returncode == 0:
+            return True, ""
+        err = (proc.stdout or "") + (proc.stderr or "")
+        short_err = err.strip()[-500:] if err.strip() else "(no output)"
+        if verbose:
+            print(f"⚠️  [{sif_path.parent.name}] build attempt {attempt}/{retries} "
+                  f"failed (exit {proc.returncode}): {short_err}")
+        if attempt < retries:
+            delay = 2 ** attempt
+            time.sleep(delay)
+    return False, f"Apptainer build failed after {retries} attempts"
+
+
 def build_and_test(
     sif_path: Path, def_path: Path, test_py: str, run_initial_tests: bool = True
 ) -> tuple[bool, str]:
     """Build container and optionally run initial tests."""
-    with open(def_path, "r") as f:
-        def_text = f.read()
-
-    if "chmod 755 /home/user" not in def_text:
-        section_headers = [line for line in def_text.split("\n") if line.strip().startswith("%")]
-        post_idx = [i for i, line in enumerate(section_headers) if "post" in line.lower()]
-        if post_idx:
-            idx = post_idx[0]
-            if idx + 1 < len(section_headers):
-                next_header = section_headers[idx + 1]
-                def_text = def_text.replace(
-                    next_header, "    chmod 755 /home/user\n" + next_header
-                )
-            else:
-                def_text = def_text.rstrip() + "\n    chmod 755 /home/user\n"
-            with open(def_path, "w") as f:
-                f.write(def_text)
-
-    build_rc = subprocess.run(
-        ["apptainer", "build", str(sif_path), str(def_path)],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    ).returncode
-    if build_rc:
-        print(f"Apptainer build failed: {build_rc}")
-        return False, "Apptainer build failed"
+    ok, msg = build_sif(sif_path, def_path, verbose=True)
+    if not ok:
+        return False, msg
 
     if not run_initial_tests:
         return True, ""
@@ -258,9 +293,69 @@ def parse_args(argv: Optional[List[str]] = None) -> SolutionConfig:
         metavar="PATH",
         help="Append full stdout/stderr of this process (everything on your central terminal) to PATH; still prints to terminal",
     )
+    ap.add_argument(
+        "--build-workers",
+        type=int,
+        default=1,
+        help="Max concurrent SIF builds in the pre-build phase (default: 1 = serial, safe for shared cache/tmp)",
+    )
+    ap.add_argument(
+        "--build-retries",
+        type=int,
+        default=3,
+        help="Retries per SIF build with exponential backoff (default: 3)",
+    )
 
     args = ap.parse_args(argv)
     return SolutionConfig(**vars(args))
+
+
+_BOOTSTRAP_RE = re.compile(r"^\s*Bootstrap\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+_FROM_RE = re.compile(r"^\s*From\s*:\s*(\S+)", re.IGNORECASE | re.MULTILINE)
+
+
+def _prepull_base_images(def_paths: list[Path]) -> None:
+    """Pre-pull unique Docker base images into the Apptainer OCI cache.
+
+    Without this, every ``apptainer build`` with ``Bootstrap: docker`` fetches
+    from Docker Hub independently, quickly exhausting the unauthenticated rate
+    limit (100 pulls / 6 h / IP).  A single ``apptainer pull`` per unique image
+    populates the cache; subsequent builds reuse it.
+    """
+    images: set[str] = set()
+    for dp in def_paths:
+        try:
+            text = dp.read_text()
+        except OSError:
+            continue
+        m_bootstrap = _BOOTSTRAP_RE.search(text)
+        m_from = _FROM_RE.search(text)
+        if m_bootstrap and m_from and m_bootstrap.group(1).lower() == "docker":
+            images.add(m_from.group(1))
+
+    if not images:
+        return
+
+    print(f"\n📦 Pre-pulling {len(images)} base image(s) into Apptainer cache...")
+    for img in sorted(images):
+        uri = f"docker://{img}"
+        print(f"  pulling {uri} ...", end=" ", flush=True)
+        proc = subprocess.run(
+            ["apptainer", "pull", "--disable-cache=false", uri],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            cwd="/tmp",
+        )
+        if proc.returncode == 0:
+            print("done")
+            sif_name = img.replace("/", "_").replace(":", "_") + ".sif"
+            sif_artifact = Path("/tmp") / sif_name
+            sif_artifact.unlink(missing_ok=True)
+        else:
+            err = (proc.stderr or "").strip()[-300:]
+            print(f"warning ({err or 'exit ' + str(proc.returncode)})")
+    print()
 
 
 def _run_generate_solutions(cfg: SolutionConfig) -> None:
@@ -330,21 +425,68 @@ def _run_generate_solutions(cfg: SolutionConfig) -> None:
         print(f"No task directories found in {cfg.tasks_dir}")
         return
 
+    # ------------------------------------------------------------------
+    # Pre-build phase: build all missing SIFs with controlled concurrency
+    # ------------------------------------------------------------------
+    to_build: list[tuple[Path, Path]] = []
+    for td in task_dirs:
+        td = Path(td)
+        sif = td / "container.sif"
+        defp = td / "container.def"
+        if not sif.exists() and defp.exists():
+            to_build.append((sif, defp))
+
+    if to_build:
+        _prepull_base_images([defp for _, defp in to_build])
+        print(f"\n🔨 Pre-build phase: {len(to_build)} SIF(s) to build "
+              f"(workers={cfg.build_workers}, retries={cfg.build_retries})")
+
+        def _build_one(pair: tuple[Path, Path]) -> tuple[str, bool, str]:
+            sif, defp = pair
+            ok, msg = build_sif(
+                sif, defp,
+                retries=cfg.build_retries,
+                verbose=True,
+            )
+            tag = sif.parent.name
+            if ok:
+                print(f"  ✅ {tag}")
+            else:
+                print(f"  ❌ {tag}: {msg}")
+            return tag, ok, msg
+
+        if cfg.build_workers <= 1:
+            for pair in tqdm(to_build, desc="Building SIFs"):
+                _build_one(pair)
+        else:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            with ThreadPoolExecutor(max_workers=cfg.build_workers) as bld_exec:
+                futs = {bld_exec.submit(_build_one, p): p for p in to_build}
+                with tqdm(total=len(to_build), desc="Building SIFs") as bld_pbar:
+                    for fut in as_completed(futs):
+                        fut.result()
+                        bld_pbar.update(1)
+
+        built = sum(1 for td in task_dirs if (Path(td) / "container.sif").exists())
+        print(f"🔨 Pre-build done: {built}/{len(task_dirs)} tasks have a SIF\n")
+
+    # ------------------------------------------------------------------
+    # Solution phase (high concurrency)
+    # ------------------------------------------------------------------
+    model_summary_name = f"{cfg.model.replace('/', '_')}_summary.json"
+
     def process_task_with_retry(task_dir: str, cfg: SolutionConfig):
         """Wrap per-task retry logic so it can run in parallel."""
         task_dir = Path(task_dir)
 
         sol_dir = task_dir / "solutions"
-        existing = (
-            [f for f in sol_dir.glob("*_summary.json") if f.name != "summary.json"]
-            if sol_dir.exists()
-            else []
-        )
-        if existing and not cfg.force_rerun:
-            print(f"Skipping {task_dir.name} (already has {existing[0].name})")
+        model_summary = sol_dir / model_summary_name
+        if model_summary.exists() and not cfg.force_rerun:
+            print(f"Skipping {task_dir.name} (already has {model_summary_name})")
             return task_dir, "skipped"
-        if existing and cfg.force_rerun:
-            print(f"Re-running {task_dir.name} (--force-rerun; overwriting {existing[0].name})")
+        if model_summary.exists() and cfg.force_rerun:
+            print(f"Re-running {task_dir.name} (--force-rerun; overwriting {model_summary_name})")
 
         max_retries = 1
         result = None
@@ -386,8 +528,7 @@ def main() -> None:
     if cfg.terminal_log:
         log_path = Path(cfg.terminal_log).expanduser().resolve()
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        log_f = open(log_path, "a", encoding="utf-8", errors="replace")
-        log_f.write(f"\n{'=' * 80}\n")
+        log_f = open(log_path, "w", encoding="utf-8", errors="replace")
         log_f.write(f"terminal log opened {datetime.now(timezone.utc).isoformat()}\n")
         log_f.write(f"cwd={os.getcwd()}\n")
         log_f.write(f"argv={' '.join(sys.argv)}\n")

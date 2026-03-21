@@ -189,6 +189,7 @@ def _generate_batch(cfg: AsyncBatchConfig, batch_count: int) -> List[Optional[Pa
         temperature=cfg.test_temperature,
         max_tokens=cfg.max_tokens,
         max_concurrency=min(64, cfg.max_concurrency),
+        max_retries=cfg.max_def_retries,
     )
 
     valid_indices = [i for i, def_text in enumerate(def_candidates) if def_text]

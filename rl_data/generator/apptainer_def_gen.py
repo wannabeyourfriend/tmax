@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import re
 import shutil
 import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
-import re
 from typing import Optional, List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
 from rl_data import chat_completion_batch, DEFAULT_MODEL
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Base image registry: domain -> .sif path
@@ -40,6 +43,32 @@ def _resolve_base(domain: str) -> Path:
     if not base.exists():
         base = DEFAULT_BASE
     return base
+
+
+# ---------------------------------------------------------------------------
+# Def sanitisation & transient-error detection
+# ---------------------------------------------------------------------------
+
+def _sanitize_def(def_text: str) -> str:
+    """Strip ``set -e`` variants that cause spurious failures on benign errors."""
+    return re.sub(
+        r"^\s*set\s+-[euxo]+(?:\s+pipefail)?\s*$", "", def_text, flags=re.MULTILINE
+    )
+
+
+_TRANSIENT_PATTERNS = (
+    "conveyor failed to get",
+    "unexpected end of json input",
+    "connection reset by peer",
+    "tls handshake timeout",
+    "could not resolve host",
+    "temporary failure in name resolution",
+)
+
+
+def _is_transient_error(output: str) -> bool:
+    low = output.lower()
+    return any(p in low for p in _TRANSIENT_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -99,9 +128,15 @@ Keep the %post section focused: install only what's needed, create the
 required files/directories/data, and ensure /home/user is writable."""
 
 
-def build_and_test(def_template: str, test_py: str) -> tuple[bool, str]:
-    """Build an Apptainer image from a def and run initial-state tests."""
+def build_and_test(
+    def_template: str, test_py: str, *, build_retries: int = 2
+) -> tuple[bool, str]:
+    """Build an Apptainer image from a def and run initial-state tests.
+
+    Transient network / OCI-pull errors are retried up to *build_retries* times.
+    """
     import os
+
     tmp_base = os.environ.get("APPTAINER_TMPDIR", None)
     with tempfile.TemporaryDirectory(dir=tmp_base) as td:
         td_path = Path(td)
@@ -113,14 +148,25 @@ def build_and_test(def_template: str, test_py: str) -> tuple[bool, str]:
         test_file.write_text(test_py)
 
         sif_path = td_path / "img.sif"
-        build_proc = subprocess.run(
-            ["apptainer", "build", str(sif_path), str(def_path)],
-            capture_output=True, text=True, timeout=300,
-        )
+        last_err = ""
+        for attempt in range(1 + build_retries):
+            if sif_path.exists():
+                sif_path.unlink()
+            build_proc = subprocess.run(
+                ["apptainer", "build", str(sif_path), str(def_path)],
+                capture_output=True, text=True, timeout=300,
+            )
+            if build_proc.returncode == 0:
+                break
+            last_err = (build_proc.stderr or build_proc.stdout or "")[-500:]
+            if attempt < build_retries and _is_transient_error(last_err):
+                logger.info("Transient build error (attempt %d), retrying…", attempt + 1)
+                continue
+            break
+
         if build_proc.returncode:
-            err_snippet = (build_proc.stderr or build_proc.stdout or "")[-500:]
-            print(f"Apptainer build failed (rc={build_proc.returncode}): {err_snippet}")
-            return False, f"Apptainer build failed: {err_snippet}"
+            print(f"Apptainer build failed (rc={build_proc.returncode}): {last_err}")
+            return False, f"Apptainer build failed: {last_err}"
 
         proc = subprocess.run(
             [
@@ -161,63 +207,85 @@ def iterate_def_template_batch(
     temperature: float = 0.6,
     max_tokens: int = 2048,
     max_concurrency: int = 64,
+    max_retries: int = 0,
 ) -> List[Optional[str]]:
-    """Batched def generation with pre-built base images.
+    """Batched def generation with retry loop and error feedback.
 
-    Parameters
-    ----------
-    items : list of (task_description, truth, test_py)
-    domains : list of domain strings aligned with items (selects the base image)
+    Failed items are re-prompted with the build/test error so the LLM can
+    self-correct.  Defs containing ``{{ }}`` build variables are caught
+    before an expensive build attempt.
     """
     if domains is None:
         domains = ["software_engineering"] * len(items)
 
-    messages: list[list[dict[str, str]]] = []
-    for (task_description, truth, test_py), domain in zip(items, domains):
-        prompt = BASE_USER_TEMPLATE.format(
-            domain=domain.replace("_", " "),
-            task_description=task_description,
-            truth=truth,
-            test_py=test_py,
-            failures="None yet",
-        )
-        messages.append([
-            {"role": "system", "content": SYSTEM_MSG},
-            {"role": "user", "content": prompt},
-        ])
-
-    responses = chat_completion_batch(
-        messages,
-        model=model,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        num_completions=1,
-        max_concurrency=max_concurrency,
-    )
-
     results: List[Optional[str]] = [None] * len(items)
+    error_msgs: List[Optional[str]] = [None] * len(items)
+    pending = list(range(len(items)))
 
-    def worker(index: int, item: Tuple[str, str, str], resp_obj) -> Tuple[int, Optional[str]]:
+    def _try_build(idx: int, resp_obj) -> Tuple[int, Optional[str], Optional[str]]:
+        """Return (original_index, def_text | None, error_msg | None)."""
         try:
             if resp_obj is None:
-                return index, None
-            content = resp_obj.choices[0].message.content
-            def_text = parse_def_template(content)
-            _task_description, _truth, test_py = item
-            ok, _ = build_and_test(def_text, test_py)
-            return index, (def_text if ok else None)
-        except Exception:
-            return index, None
+                return idx, None, "LLM returned no response"
+            def_text = _sanitize_def(parse_def_template(
+                resp_obj.choices[0].message.content))
+            if re.search(r"\{\{.*?\}\}", def_text):
+                return idx, None, "Def contains {{ }} build variables (forbidden)."
+            _, _, test_py = items[idx]
+            ok, output = build_and_test(def_text, test_py)
+            return (idx, def_text, None) if ok else (idx, None, output)
+        except Exception as exc:
+            logger.warning("Def worker failed for item %d: %s", idx, exc)
+            return idx, None, str(exc)
 
-    build_workers = min(4, len(items))
-    futures = []
-    with ThreadPoolExecutor(max_workers=build_workers) as executor:
-        for idx, (item, resp) in enumerate(zip(items, responses)):
-            futures.append(executor.submit(worker, idx, item, resp))
+    for attempt in range(1 + max_retries):
+        if not pending:
+            break
+        if attempt:
+            logger.info(
+                "Def retry round %d/%d: %d items remaining",
+                attempt, max_retries, len(pending),
+            )
 
-        for fut in tqdm(as_completed(futures), total=len(futures)):
-            idx, value = fut.result()
-            results[idx] = value
+        messages: list[list[dict[str, str]]] = []
+        for idx in pending:
+            task_description, truth, test_py = items[idx]
+            prompt = BASE_USER_TEMPLATE.format(
+                domain=domains[idx].replace("_", " "),
+                task_description=task_description,
+                truth=truth,
+                test_py=test_py,
+                failures=error_msgs[idx] or "None yet",
+            )
+            messages.append([
+                {"role": "system", "content": SYSTEM_MSG},
+                {"role": "user", "content": prompt},
+            ])
+
+        responses = chat_completion_batch(
+            messages,
+            model=model,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            num_completions=1,
+            max_concurrency=max_concurrency,
+        )
+
+        next_pending: list[int] = []
+        with ThreadPoolExecutor(max_workers=min(4, len(pending))) as pool:
+            futs = [
+                pool.submit(_try_build, pending[pos], resp)
+                for pos, resp in enumerate(responses)
+            ]
+            for fut in tqdm(as_completed(futs), total=len(futs)):
+                idx, def_text, err = fut.result()
+                if def_text is not None:
+                    results[idx] = def_text
+                else:
+                    error_msgs[idx] = err
+                    next_pending.append(idx)
+
+        pending = next_pending
 
     return results
 
