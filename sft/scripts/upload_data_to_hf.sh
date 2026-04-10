@@ -39,12 +39,10 @@ echo ""
 
 python - --repo "${REPO_ID}" --input-dir "${INPUT_DIR}" --private "${PRIVATE}" << 'PYTHON_EOF'
 import argparse
-import json
 import sys
 from pathlib import Path
 
-from datasets import Dataset, DatasetDict, load_dataset
-from huggingface_hub import HfApi
+from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
 
 
 def main():
@@ -65,34 +63,64 @@ def main():
 
     api = HfApi()
 
-    # Create repo if it doesn't exist
     api.create_repo(repo_id, repo_type="dataset", private=private, exist_ok=True)
     print(f"Repo ready: https://huggingface.co/datasets/{repo_id}")
 
-    # Load each parquet as a split named after the source
-    splits = {}
+    # Upload each parquet as its own config (subset) so that sources with
+    # different metadata schemas coexist without feature-mismatch errors.
+    # HF Dataset Viewer auto-detects parquet files by path convention:
+    #   data/{config_name}/{split}-*.parquet
+    operations = []
+
+    # Clear stale data/ and README from previous uploads
+    operations.append(CommitOperationDelete(path_in_repo="data/", is_folder=True))
+
+    config_names = []
     for pf in parquet_files:
-        split_name = pf.stem.replace("-", "_")
-        ds = Dataset.from_parquet(str(pf))
-        splits[split_name] = ds
-        print(f"  Loaded {pf.name}: {len(ds)} rows → split '{split_name}'")
+        config_name = pf.stem.replace("-", "_")
+        config_names.append(config_name)
+        path_in_repo = f"data/{config_name}/train-00000-of-00001.parquet"
+        operations.append(CommitOperationAdd(
+            path_in_repo=path_in_repo,
+            path_or_fileobj=str(pf),
+        ))
+        print(f"  {pf.name} → {path_in_repo}")
 
-    dd = DatasetDict(splits)
-    dd.push_to_hub(repo_id, private=private)
-    print(f"\nPushed {len(splits)} split(s) to https://huggingface.co/datasets/{repo_id}")
+    # Generate README.md with YAML configs so the Dataset Viewer
+    # knows about each subset and its data files.
+    yaml_configs = "configs:\n"
+    for cn in config_names:
+        yaml_configs += (
+            f"- config_name: {cn}\n"
+            f"  data_files:\n"
+            f"  - split: train\n"
+            f"    path: data/{cn}/train-*.parquet\n"
+        )
+    default = config_names[0] if config_names else "default"
+    yaml_configs += f"default_config_name: {default}\n"
 
-    # Also upload the conversion report if present
+    readme = f"---\n{yaml_configs}---\n"
+    operations.append(CommitOperationAdd(
+        path_in_repo="README.md",
+        path_or_fileobj=readme.encode(),
+    ))
+
     report_path = input_dir / "conversion_report.json"
     if report_path.exists():
-        api.upload_file(
-            path_or_fileobj=str(report_path),
+        operations.append(CommitOperationAdd(
             path_in_repo="conversion_report.json",
-            repo_id=repo_id,
-            repo_type="dataset",
-        )
-        print(f"  Uploaded conversion_report.json")
+            path_or_fileobj=str(report_path),
+        ))
 
-    print(f"\nDone. Preview at: https://huggingface.co/datasets/{repo_id}")
+    print(f"\nUploading {len(parquet_files)} config(s) in a single commit ...")
+    api.create_commit(
+        repo_id=repo_id,
+        repo_type="dataset",
+        operations=operations,
+        commit_message=f"Upload {len(parquet_files)} converted sources",
+    )
+
+    print(f"\nDone. {len(parquet_files)} config(s) at: https://huggingface.co/datasets/{repo_id}")
 
 
 if __name__ == "__main__":

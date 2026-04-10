@@ -16,13 +16,13 @@ cd "$(dirname "$0")/.."
 # Output: output/preprocessing/terminus2_sweagent/
 
 NUM_WORKERS="$(nproc)"
-OUTPUT_DIR="output/preprocessing/terminus2_sweagent_full_20260403"
+OUTPUT_DIR="output/preprocessing/terminus2_sweagent_full_20260409"
 MAX_TURNS=999
 NUM_EXAMPLES=3
-HF_REPO="osieosie/tmax-sft-full-20260403"
+HF_REPO="osieosie/tmax-sft-full-20260409"
 UPLOAD=true
 UPLOAD_FLAGS=""
-INCLUDE_PARTIAL=true
+INCLUDE_PARTIAL=false
 
 # Parse our flags, pass the rest through to pipeline.py
 PIPELINE_EXTRA=""

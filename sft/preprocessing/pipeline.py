@@ -30,6 +30,7 @@ from datasets.table import InMemoryTable
 from huggingface_hub import HfApi, hf_hub_download
 
 from preprocessing.convert import convert_trace
+from preprocessing.convert_sera import convert_sera_trace
 from preprocessing.filters import (
     FilterVerdict,
     apply_mandatory_filters,
@@ -75,6 +76,7 @@ def _iter_source_subsets(
             items.append({
                 "repo_id": repo_id,
                 "type": load_type,
+                "format": source.get("format", "terminus2"),
                 "subset": sub.get("subset"),
                 "pattern": sub.get("pattern"),
                 "source_label": label,
@@ -247,8 +249,9 @@ def process_source(
         "messages": [], "source": [], "metadata": [],
         "warnings": [], "_drop_reason": [],
     }
-    if conv_col in raw_cols:
-        dropped_data[conv_col] = []
+    _raw_conv_key = conv_col if conv_col not in dropped_data else None
+    if _raw_conv_key and conv_col in raw_cols:
+        dropped_data[_raw_conv_key] = []
 
     dropped_reasons_list: list[str] = []
     drop_reasons: dict[str, int] = {}
@@ -259,7 +262,14 @@ def process_source(
     t_loop = time.time()
     for i in range(input_count):
         row = {col: raw_cols[col][i] for col in raw_cols}
-        result = convert_trace(row, source_label=label, conversations_column=conv_col)
+        if item.get("format") == "sera":
+            result = convert_sera_trace(
+                row, source_label=label, messages_column=conv_col,
+            )
+        else:
+            result = convert_trace(
+                row, source_label=label, conversations_column=conv_col,
+            )
 
         # ── mandatory filters ─────────────────────────────────────
         mandatory = apply_mandatory_filters(
@@ -271,8 +281,8 @@ def process_source(
             dropped_data["metadata"].append(result["metadata"])
             dropped_data["warnings"].append(result["warnings"])
             dropped_data["_drop_reason"].append(mandatory.drop_reason)
-            if conv_col in dropped_data:
-                dropped_data[conv_col].append(row.get(conv_col, []))
+            if _raw_conv_key:
+                dropped_data[_raw_conv_key].append(row.get(conv_col, []))
             dropped_reasons_list.append(mandatory.drop_reason)
             drop_reasons[mandatory.drop_reason] = drop_reasons.get(mandatory.drop_reason, 0) + 1
             continue
@@ -285,8 +295,8 @@ def process_source(
             dropped_data["metadata"].append(result["metadata"])
             dropped_data["warnings"].append(result["warnings"])
             dropped_data["_drop_reason"].append(optional.drop_reason)
-            if conv_col in dropped_data:
-                dropped_data[conv_col].append(row.get(conv_col, []))
+            if _raw_conv_key:
+                dropped_data[_raw_conv_key].append(row.get(conv_col, []))
             dropped_reasons_list.append(optional.drop_reason)
             drop_reasons[optional.drop_reason] = drop_reasons.get(optional.drop_reason, 0) + 1
             continue
@@ -349,7 +359,7 @@ def process_source(
             sampled = rng.sample(idxs, min(2, len(idxs)))
             for idx in sampled:
                 row = dropped[idx]
-                raw_convos = row.get(conv_col, [])
+                raw_convos = row.get(_raw_conv_key, []) if _raw_conv_key else []
                 dropped_examples.append({
                     "source": row.get("source", label),
                     "drop_reason": reason,

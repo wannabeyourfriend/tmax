@@ -22,3 +22,11 @@ sources:
       - subset: "skill_based_mixed"
         pattern: "synthetic_tasks/skill_based/mixed/*/data_filtered.parquet"
         source_label: "nvidia/Nemotron-Terminal-Corpus/skill_based_mixed"
+
+  - name: "allenai/Sera-4.6-Lite-47000"
+    type: huggingface
+    format: sera
+    conversations_column: "messages"
+    subsets:
+      - subset: null
+        source_label: "allenai/Sera-4.6-Lite-47000"
