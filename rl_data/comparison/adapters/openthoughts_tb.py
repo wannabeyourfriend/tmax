@@ -34,11 +34,19 @@ class OpenThoughtsTBAdapter(Adapter):
     def convert_one(self, src: Path, dst_root: Path):
         # Prefix to avoid clashing with ET's UUID-named dirs in case both
         # end up side-by-side during debugging.
+        #
+        # OpenThoughts-TB ships tests as `tests/test_outputs.py` (not
+        # `test_final_state.py`), and the test imports a sibling `grader.py`
+        # with various data files. We ask the shared helper to (a) treat
+        # `test_outputs.py` as the final-state test and (b) copy the rest of
+        # `tests/` so grader imports + data lookups work after flattening.
         return flatten_harbor_task(
             src, dst_root,
             source_name="ot",
             source_repo=self.hf_repo_id,
             prefix="otb_",
+            test_final_candidates=("test_outputs.py", "test_final_state.py"),
+            copy_aux_test_files=True,
         )
 
 

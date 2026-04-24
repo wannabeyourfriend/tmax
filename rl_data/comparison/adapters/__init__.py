@@ -141,19 +141,56 @@ def _load_task_toml(toml_path: Path) -> Dict[str, Any]:
     return out
 
 
-def _dockerfile_to_apptainer_def(dockerfile_text: str) -> str:
+def _dockerfile_to_apptainer_def(
+    dockerfile_text: str,
+    build_context_dir: Optional[Path] = None,
+) -> str:
     """Convert a minimal Dockerfile into an Apptainer container.def.
 
     Supports the common subset used by Harbor datasets: ``FROM``, ``RUN``,
     ``COPY``, ``ENV``, ``WORKDIR``.  Anything unrecognized is appended as
     shell commands in ``%post`` with a comment marker so builds still progress.
+
+    Handles shell-style line continuations (``\\`` at end of line) by folding
+    them into a single logical line before keyword dispatch. Without this, a
+    multi-line ``RUN apt-get install -y \\ \\n  curl \\ \\n  python3`` block
+    would produce one legitimate RUN line followed by garbage comment lines.
+
+    ``build_context_dir`` should be the absolute path to the (already-
+    flattened) task directory that holds the payload files referenced by
+    ``COPY`` directives. When provided, ``COPY src dst`` turns into an
+    Apptainer ``%files`` entry whose host side is
+    ``<build_context_dir>/<src>`` -- absolute, so ``apptainer build`` can
+    resolve it regardless of the caller's CWD. When ``None``, ``COPY`` lines
+    degrade to a comment (old behavior) for call sites that don't ship payload.
     """
+    # Fold `\<newline><indent>` into a single space so RUN blocks stay intact.
+    folded = re.sub(r"\\\s*\n\s*", " ", dockerfile_text)
+
     base = "ubuntu:22.04"
     post_lines: list[str] = []
     files_lines: list[str] = []
     env_lines: list[str] = []
 
-    for raw in dockerfile_text.splitlines():
+    def _resolve_copy_src(raw_src: str) -> Optional[Path]:
+        """Map a Dockerfile COPY source token to an absolute host path.
+
+        Returns None if we can't safely materialize this (e.g. multi-stage
+        ``--from=builder`` which we don't emulate, or a path that escapes
+        the build context).
+        """
+        if build_context_dir is None:
+            return None
+        # Strip leading ``./``. Reject absolute and parent-traversing paths.
+        t = raw_src.lstrip()
+        if t.startswith("./"):
+            t = t[2:]
+        if t.startswith("/") or ".." in Path(t).parts:
+            return None
+        candidate = build_context_dir / t
+        return candidate if candidate.exists() else None
+
+    for raw in folded.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
@@ -169,8 +206,40 @@ def _dockerfile_to_apptainer_def(dockerfile_text: str) -> str:
             # Collapse continuation; keep multiline shell blocks intact.
             post_lines.append(f"    {rest}")
         elif kw == "COPY":
-            # Copy sources must become %files entries; fall back to a comment if ambiguous.
-            post_lines.append(f"    # COPY {rest}  (skipped; no workspace bind)")
+            # `COPY --from=builder ...` (multi-stage) or other flag forms are
+            # not supported; emit a comment so we don't silently pretend.
+            if rest.lstrip().startswith("--"):
+                post_lines.append(f"    # COPY {rest}  (skipped; multi-stage/flagged COPY)")
+                continue
+            # Support `COPY src1 src2 ... dst` (last token is the destination).
+            toks = rest.split()
+            if len(toks) < 2:
+                post_lines.append(f"    # COPY {rest}  (skipped; malformed)")
+                continue
+            dst = toks[-1]
+            srcs = toks[:-1]
+            resolved: list[tuple[Path, str]] = []
+            failed: list[str] = []
+            for s in srcs:
+                host = _resolve_copy_src(s)
+                if host is None:
+                    failed.append(s)
+                else:
+                    resolved.append((host, s))
+            if failed:
+                post_lines.append(f"    # COPY {rest}  (skipped; sources missing: {failed})")
+                continue
+            # Multi-source COPY implies dst is a directory. Apptainer %files
+            # honours that with a trailing slash; add one defensively.
+            dst_display = dst if (len(resolved) == 1 and not dst.endswith("/")) else (
+                dst if dst.endswith("/") else dst + "/"
+            )
+            for host, _ in resolved:
+                files_lines.append(f"    {host} {dst_display}")
+            # Make sure the destination directory exists (apptainer %files
+            # does not mkdir intermediate paths for file destinations).
+            dst_parent = dst_display.rsplit("/", 1)[0] or "/"
+            post_lines.append(f"    mkdir -p {dst_parent}")
         elif kw == "ENV":
             env_lines.append(f"    export {rest.replace(' ', '=', 1)}")
         elif kw == "WORKDIR":
@@ -198,20 +267,38 @@ def flatten_harbor_task(
     prefix: str = "",
     extra_task_json: Optional[Callable[[Dict[str, Any], Path], Dict[str, Any]]] = None,
     task_name_override: Optional[str] = None,
+    test_final_candidates: tuple[str, ...] = ("test_final_state.py",),
+    copy_aux_test_files: bool = False,
 ) -> Optional[str]:
     """Flatten a Harbor-layout task dir (environment/+tests/+instruction.md)
     into our canonical layout under ``dst_root``.
 
+    ``test_final_candidates`` lists filenames to try (in order) inside the
+    ``tests/`` source directory; the first one that exists is copied to
+    ``dst/test_final_state.py``. OpenThoughts-TB ships ``test_outputs.py``
+    rather than ``test_final_state.py``, for example.
+
+    When ``copy_aux_test_files`` is True, all other (non-main, non-shell) files
+    from ``tests/`` are copied verbatim into the flattened task dir so the
+    main test can ``import`` them (OT's ``test_outputs.py`` does
+    ``from grader import grade``) and read sibling data files
+    (``answers.json``, etc.) at grading time.
+
     Returns the produced task name, or ``None`` if the source is unusable
-    (missing `container.def` + `Dockerfile`, or missing `test_final_state.py`).
+    (missing container recipe or none of the test_final_candidates present).
     """
     env = src / "environment"
     tests = src / "tests"
 
     container_def = env / "container.def"
     test_initial = env / "test_initial_state.py"
-    test_final = tests / "test_final_state.py"
-    if not test_final.exists():
+    test_final: Optional[Path] = None
+    for cand in test_final_candidates:
+        p = tests / cand
+        if p.exists():
+            test_final = p
+            break
+    if test_final is None:
         return None
     if not container_def.exists():
         # Try to derive one from a Dockerfile if present.
@@ -279,7 +366,28 @@ def flatten_harbor_task(
         shutil.copy2(container_def, out / "container.def")
     else:
         dockerfile = env / "Dockerfile"
-        derived = _dockerfile_to_apptainer_def(dockerfile.read_text())
+        # The Dockerfile's COPY sources are relative to the Dockerfile's dir
+        # (the `environment/` directory), so we stage that payload next to
+        # our output def and hand the derived def absolute paths rooted there.
+        if env.exists():
+            for entry in env.iterdir():
+                if entry.name in ("Dockerfile", "__pycache__"):
+                    continue
+                if entry.name.startswith("."):
+                    continue
+                target = out / entry.name
+                try:
+                    if entry.is_dir():
+                        shutil.copytree(entry, target, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(entry, target)
+                except OSError as exc:
+                    logger.warning("flatten_harbor_task: could not copy env payload %s -> %s: %s",
+                                   entry, target, exc)
+        derived = _dockerfile_to_apptainer_def(
+            dockerfile.read_text(),
+            build_context_dir=out,
+        )
         (out / "container.def").write_text(derived)
 
     shutil.copy2(test_final, out / "test_final_state.py")
@@ -287,6 +395,32 @@ def flatten_harbor_task(
         shutil.copy2(test_initial, out / "test_initial_state.py")
     else:
         (out / "test_initial_state.py").write_text(_PLACEHOLDER_INITIAL_STATE)
+
+    # Optionally copy auxiliary files that the main test relies on (OT ships
+    # e.g. grader.py and answers.json next to test_outputs.py). We skip shell
+    # scripts and the main test itself (already handled above). Directories are
+    # copied recursively.
+    if copy_aux_test_files and tests.exists():
+        for entry in tests.iterdir():
+            # Don't re-copy the chosen test file (we've already renamed it
+            # to test_final_state.py above).
+            if entry == test_final:
+                continue
+            # Skip bash helpers; the harness only uses Python tests.
+            if entry.suffix == ".sh":
+                continue
+            # Hide pyc/__pycache__ noise and dotfiles.
+            if entry.name.startswith(".") or entry.name == "__pycache__":
+                continue
+            target = out / entry.name
+            try:
+                if entry.is_dir():
+                    shutil.copytree(entry, target, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(entry, target)
+            except OSError as exc:
+                logger.warning("flatten_harbor_task: could not copy aux file %s -> %s: %s",
+                               entry, target, exc)
 
     return task_name
 
@@ -296,4 +430,5 @@ from rl_data.comparison.adapters import (  # noqa: E402, F401
     skill_tax,
     endless_terminals,
     openthoughts_tb,
+    openthoughts_agent_rl,
 )

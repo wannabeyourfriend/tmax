@@ -38,7 +38,7 @@ SOLUTION_TEMPERATURE=0.7
 COMMAND_TIMEOUT=60
 SHELL_INIT_TIMEOUT=240
 SHELL_INIT_ATTEMPTS=3
-BUILD_WORKERS=4
+BUILD_WORKERS=12
 BUILD_RETRIES=3
 # NOTE: no BASE_SIFS_DIR — ET tasks don't share the 9 prebuilt bases.
 FORCE_RERUN=0
@@ -80,10 +80,86 @@ export APPTAINER_CACHEDIR="/gpfs/projects/h2lab/osey/apptainer_cache"
 export APPTAINER_TMPDIR="/tmp/apptainer_tmp"
 mkdir -p "$APPTAINER_TMPDIR"
 
+# Keep apptainer instance logs off GPFS (rootless cgroups aren't supported there).
+# Unconditionally ensure the /tmp target dir exists -- it can disappear between
+# runs (node reboots, /tmp cleanup) while the symlink on GPFS persists, leaving
+# a dangling symlink that makes `apptainer instance start` fail with
+# `mkdir ...: file exists`. Creating the target first heals that case cheaply.
+mkdir -p /tmp/apptainer_instances
 if [ ! -L "$HOME/.apptainer/instances" ]; then
   rm -rf "$HOME/.apptainer/instances"
-  mkdir -p /tmp/apptainer_instances
   ln -s /tmp/apptainer_instances "$HOME/.apptainer/instances"
+fi
+
+# ---- ET-only base SIF bootstrap -----------------------------------------
+# Every ET container.def uses `Bootstrap: localimage` + `From: ./ubuntu_22.04.sif`
+# resolved against the CWD (PROJECT_ROOT). Build that base SIF once here so the
+# 2.5k per-task builds can layer on top of it.
+#
+# LEVER 2: Pre-install python3 + pip + pytest + ca-certificates into the base
+# SIF so the 2,488/2,492 ET defs that install those same packages turn into
+# essentially-free no-ops. Without this, running N parallel builds thundering-
+# herds archive.ubuntu.com + files.pythonhosted.org and pip times out.
+#
+# LEVER 3: Keep /var/lib/apt/lists/* populated in the base SIF. Each ET def
+# still does `apt-get update` at the top of its %post; with cached lists,
+# that becomes a handful of small HEAD/InRelease requests (~1-3s) instead of
+# redownloading the full ~46MB package index (~20-30s) from archive.ubuntu.com.
+# Adds ~20MB to the base SIF; saves >3 hours across 500 per-task builds.
+#
+# A version marker file (BASE_UBUNTU_SIF.version) lets us force a rebuild when
+# the recipe below changes -- bump BASE_UBUNTU_SIF_VERSION to invalidate.
+BASE_UBUNTU_SIF="$PROJECT_ROOT/ubuntu_22.04.sif"
+BASE_UBUNTU_SIF_VERSION="v3-py+pytest+aptlists"
+BASE_UBUNTU_SIF_MARK="${BASE_UBUNTU_SIF}.version"
+
+_need_base_build=0
+if [ ! -f "$BASE_UBUNTU_SIF" ]; then
+  _need_base_build=1
+  _reason="missing"
+elif [ ! -f "$BASE_UBUNTU_SIF_MARK" ] || \
+     [ "$(cat "$BASE_UBUNTU_SIF_MARK" 2>/dev/null)" != "$BASE_UBUNTU_SIF_VERSION" ]; then
+  _need_base_build=1
+  _reason="stale (want ${BASE_UBUNTU_SIF_VERSION}, got $(cat "$BASE_UBUNTU_SIF_MARK" 2>/dev/null || echo none))"
+fi
+
+if [ "$_need_base_build" = "1" ]; then
+  echo "=== ET base SIF ${_reason}; building enriched base (python3 + pip + pytest) ==="
+  BASE_UBUNTU_DEF="$(mktemp --suffix=.def)"
+  trap 'rm -f "$BASE_UBUNTU_DEF"' EXIT
+  cat > "$BASE_UBUNTU_DEF" <<'EOF'
+Bootstrap: docker
+From: ubuntu:22.04
+
+%post
+    set -e
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-setuptools \
+        python3-wheel \
+        ca-certificates
+    pip3 install --no-cache-dir pytest
+    apt-get clean
+    # NOTE: Intentionally keep /var/lib/apt/lists/* populated (Lever 3) so
+    # per-task `apt-get update` is nearly a no-op instead of re-fetching 46MB.
+
+%labels
+    Author rl_data-et-bootstrap
+    Description "Ubuntu 22.04 + python3 + pip + pytest + prepopulated apt lists, prebaked for ET per-task builds."
+EOF
+  if ! apptainer build --force "$BASE_UBUNTU_SIF" "$BASE_UBUNTU_DEF"; then
+    echo "ERROR: failed to build enriched $BASE_UBUNTU_SIF (ET per-task builds require this)." >&2
+    exit 1
+  fi
+  echo "$BASE_UBUNTU_SIF_VERSION" > "$BASE_UBUNTU_SIF_MARK"
+  rm -f "$BASE_UBUNTU_DEF"
+  trap - EXIT
+  echo "=== ET base SIF ready: $BASE_UBUNTU_SIF (version=${BASE_UBUNTU_SIF_VERSION}) ==="
+else
+  echo "=== ET base SIF already present: $BASE_UBUNTU_SIF (version=${BASE_UBUNTU_SIF_VERSION}, skipping build) ==="
 fi
 
 EXTRA_ARGS=()

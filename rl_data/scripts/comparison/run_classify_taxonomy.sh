@@ -4,7 +4,7 @@
 #
 # Env:
 #   CLASSIFY_DIRS    Space-separated list of tasks dirs to classify. Default:
-#                    "rl_data/output/tasks_endless_terminals rl_data/output/tasks_openthoughts_tb"
+#                    "rl_data/output/tasks_openthoughts_agent_rl"
 #   CLASSIFY_MODEL   LLM slug. Default: gemini/gemini-3-flash-preview
 #   CLASSIFY_LIMIT   Classify at most N unclassified tasks per dir (0 = all).
 #   CLASSIFY_FORCE=1 Re-classify even if classified_* fields already exist.
@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-CLASSIFY_DIRS=${CLASSIFY_DIRS:-"rl_data/output/tasks_endless_terminals rl_data/output/tasks_openthoughts_tb"}
+CLASSIFY_DIRS=${CLASSIFY_DIRS:-"rl_data/output/tasks_openthoughts_agent_rl"}
 CLASSIFY_MODEL="${CLASSIFY_MODEL:-gemini/gemini-3-flash-preview}"
 CLASSIFY_LIMIT="${CLASSIFY_LIMIT:-0}"
 CLASSIFY_CONCURRENCY="${CLASSIFY_CONCURRENCY:-32}"

@@ -27,6 +27,7 @@ import math
 import random
 import re
 import sys
+import warnings
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -1125,7 +1126,14 @@ def _verifier_features(task_dir: Path) -> Dict[str, Any]:
         return default
     try:
         src = p.read_text()
-        tree = ast.parse(src)
+        # Suppress `SyntaxWarning: invalid escape sequence` emitted on 3.12+
+        # for third-party test files containing regex literals in non-raw
+        # strings (e.g. "\\s", "\\d"). These are cosmetic and orthogonal to our
+        # AST traversal. Passing `filename=str(p)` so any real SyntaxErrors
+        # still point at the offending file.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            tree = ast.parse(src, filename=str(p))
     except (OSError, SyntaxError):
         return default
 

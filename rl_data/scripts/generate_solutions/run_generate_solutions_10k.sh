@@ -79,9 +79,12 @@ mkdir -p "$APPTAINER_TMPDIR"
 
 # Redirect Apptainer instance logs off $HOME to avoid home quota exhaustion
 # under high concurrency (12 workers × 8 solutions = thousands of instance logs).
+# Keep apptainer instance logs off GPFS; heal dangling symlinks left behind
+# when /tmp was cleaned between runs (see run_generate_solutions_et.sh for
+# rationale).
+mkdir -p /tmp/apptainer_instances
 if [ ! -L "$HOME/.apptainer/instances" ]; then
   rm -rf "$HOME/.apptainer/instances"
-  mkdir -p /tmp/apptainer_instances
   ln -s /tmp/apptainer_instances "$HOME/.apptainer/instances"
 fi
 
