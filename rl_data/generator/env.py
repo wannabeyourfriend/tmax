@@ -22,6 +22,30 @@ from typing import Dict, List, Optional, Tuple
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")  # Strip ANSI escapes
 
 
+def _fakeroot_flags() -> List[str]:
+    """Return the apptainer fakeroot flag list, honouring an env opt-out.
+
+    Some upstream Docker base images (notably TerminalTraj's older Fedora /
+    glibc<2.33 layers, but also some Alpine/Ubuntu variants) ship a bundled
+    ``/.singularity.d/libs/fakeroot`` whose embedded glibc is incompatible
+    with the host kernel/userspace, causing solve-time
+    ``apptainer instance start --fakeroot`` and ``apptainer exec --fakeroot``
+    to crash with::
+
+        FATAL:   exec /.singularity.d/libs/fakeroot failed: a shared library
+                 is likely missing in the image
+
+    Setting ``APPTAINER_IGNORE_FAKEROOT_COMMAND=1`` adds
+    ``--ignore-fakeroot-command`` to every fakeroot invocation, which makes
+    apptainer skip the bundled binary and fall back to its built-in
+    user-namespace fakeroot emulation.  Default off so unaffected datasets
+    (ET / OT / TermiGen / our 10k) preserve current behaviour.
+    """
+    if os.environ.get("APPTAINER_IGNORE_FAKEROOT_COMMAND", "0") == "1":
+        return ["--fakeroot", "--ignore-fakeroot-command"]
+    return ["--fakeroot"]
+
+
 class InteractiveContainerEnvironment:
     """Manages interaction with a pre-built Apptainer container using an interactive shell over a PTY."""
 
@@ -415,7 +439,7 @@ class InteractiveContainerEnvironment:
         inner_mount = "/mnt/_agent_home_materialize"
         copy_cmd = [
             "apptainer", "exec",
-            "--fakeroot", "--userns", "--writable-tmpfs", "--cleanenv",
+            *_fakeroot_flags(), "--userns", "--writable-tmpfs", "--cleanenv",
             "--bind", f"{dest}:{inner_mount}",
             str(sif_for_materialize),
             "/bin/sh", "-c", f"cp -a /home/user/. {inner_mount}/",
@@ -443,7 +467,7 @@ class InteractiveContainerEnvironment:
 
         exec_cmd = [
             "apptainer", "exec",
-            "--fakeroot", "--userns", "--writable-tmpfs", "--cleanenv",
+            *_fakeroot_flags(), "--userns", "--writable-tmpfs", "--cleanenv",
             "--pwd", "/home/user",
             "--bind", f"{self._writable_home_path}:/home/user",
             "--bind", f"{self.temp_dir}:{self.temp_dir}",
@@ -510,7 +534,7 @@ class InteractiveContainerEnvironment:
         self.instance_name = f"agent_{uuid.uuid4().hex[:8]}"
         start_cmd = [
             "apptainer", "instance", "start",
-            "--fakeroot",
+            *_fakeroot_flags(),
             "--userns",
             "--writable-tmpfs",
             "--bind", f"{self.temp_dir}:{self.temp_dir}",
@@ -589,10 +613,27 @@ class InteractiveContainerEnvironment:
 
         command = command.strip()
 
-        # Wrap the command to always emit our marker with the exit code
-        # Use a subshell to ensure we capture the correct `$?` across pipelines
-        # Special-case heredocs: avoid grouping with braces so the terminator can be on its own line
-        if "<<" in command:
+        # Wrap the command to always emit our marker with the exit code.
+        #
+        # Three cases:
+        #   1. Heredoc (`<<`): can't group with braces, terminator must be on its
+        #      own line.  Use newline-then-marker.
+        #   2. Backgrounded command (trailing `&`): grouping with `{ cmd & ; }`
+        #      is a bash syntax error (`unexpected token ;` after `&`).  We
+        #      run it on its own line; the shell prompt returns immediately
+        #      after the spawn, so the marker prints right after with
+        #      $? = 0 (== "spawn succeeded").  This is the only case where the
+        #      reported exit code is the *spawn* status, not the command's
+        #      eventual exit -- the alternative (waiting on a daemon to exit)
+        #      would deadlock the agent loop, so spawn-success is correct.
+        #   3. Everything else: group in `{ ... ; }` so we capture `$?`
+        #      correctly across pipelines and compound statements.
+        _stripped = command.rstrip()
+        _is_background = (
+            _stripped.endswith("&")
+            and not _stripped.endswith("&&")  # `cmd1 && cmd2` is NOT a background
+        )
+        if "<<" in command or _is_background:
             wrapped = f"{command}\ncode=$?; printf '{self._marker}:%s\\n' \"$code\""
         else:
             wrapped = f"{{ {command}; }}; code=$?; printf '{self._marker}:%s\\n' \"$code\""

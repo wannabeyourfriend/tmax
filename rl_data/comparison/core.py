@@ -208,9 +208,21 @@ def save_fig_with_data(
     *,
     fieldnames: Sequence[str],
     dpi: int = 150,
+    also_pdf: bool = True,
 ) -> None:
-    """Save a matplotlib figure as ``<path_base>.png`` and the underlying numbers
-    to ``<path_base>.csv`` so the figure can be reconstructed in any style.
+    """Save a matplotlib figure + its underlying data to disk.
+
+    Always emits:
+
+    * ``<path_base>.png`` — quick-view raster (set ``dpi`` for higher
+      resolution; default 150).
+    * ``<path_base>.csv`` — the numbers behind the figure so it can be
+      replotted in any style.
+
+    Optionally emits:
+
+    * ``<path_base>.pdf`` — vector copy for Overleaf / paper inclusion.
+      Set ``also_pdf=False`` to skip when iterating quickly.
 
     Notes
     -----
@@ -221,6 +233,10 @@ def save_fig_with_data(
     path_base.parent.mkdir(parents=True, exist_ok=True)
 
     fig.savefig(path_base.with_suffix(".png"), dpi=dpi, bbox_inches="tight")
+    if also_pdf:
+        # Vector PDF for high-res / scale-free LaTeX inclusion.
+        # bbox_inches="tight" keeps the same crop as the PNG.
+        fig.savefig(path_base.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
 
     with path_base.with_suffix(".csv").open("w", newline="") as f:

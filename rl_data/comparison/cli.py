@@ -67,6 +67,9 @@ _DISPLAY_NAMES = {
     "skill_tax": "Skill-Tax (ours)",
     "endless_terminals": "Endless-Terminals",
     "openthoughts_tb": "OpenThoughts-TB",
+    "openthoughts_agent_rl": "OpenThoughts-Agent-v1-RL",
+    "termigen": "TermiGen",
+    "terminaltraj": "TerminalTraj",
 }
 
 
@@ -176,7 +179,10 @@ def _write_summary_table(report: Dict[str, Any], specs: List[DatasetSpec],
             ("mean_pass_at_8", "Mean pass@8"),
             ("mean_turns", "Mean turns"),
             ("median_turns", "Median turns"),
-            ("mean_tokens_per_run", "Mean tokens/run"),
+            ("mean_tokens_per_run", "Mean tokens/run (sum over turns)"),
+            ("mean_initial_input_tokens", "Mean initial input tokens"),
+            ("mean_peak_input_tokens", "Mean peak input tokens (final turn)"),
+            ("mean_final_output_tokens", "Mean final-turn output tokens"),
         ]:
             values = {n: per[n].get(metric_key) for n in names}
             _csv("headline", metric_key, values)

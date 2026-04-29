@@ -300,10 +300,11 @@ def build_and_test(
             return False, f"Apptainer build failed: {last_err}"
 
         try:
+            from rl_data.generator.env import _fakeroot_flags as _frf
             proc = subprocess.run(
                 [
                     "apptainer", "exec",
-                    "--fakeroot", "--userns", "--writable-tmpfs", "--cleanenv",
+                    *_frf(), "--userns", "--writable-tmpfs", "--cleanenv",
                     str(sif_path),
                     "pytest", "-q", str(test_file.name),
                 ],

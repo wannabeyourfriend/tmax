@@ -59,6 +59,12 @@ from rl_data.comparison.core import (
     save_fig_with_data,
     write_csv,
 )
+from rl_data.comparison.styles import (
+    StackedCompositionStyle,
+    default_stacked_style,
+    is_dark_color,
+    palette_colors,
+)
 from rl_data.analyze import _PRICING, _estimate_cost
 
 logger = logging.getLogger(__name__)
@@ -85,6 +91,15 @@ def module_difficulty(ctx: RunContext) -> Dict[str, Any]:
             "mean_turns": nanmean([r.get("avg_turns") for r in solved]),
             "median_turns": nanmedian([r.get("avg_turns") for r in solved]),
             "mean_tokens_per_run": nanmean([r.get("avg_tokens_est") for r in solved]),
+            "mean_initial_input_tokens": nanmean(
+                [r.get("avg_initial_input_tokens") for r in solved]
+            ),
+            "mean_peak_input_tokens": nanmean(
+                [r.get("avg_peak_input_tokens") for r in solved]
+            ),
+            "mean_final_output_tokens": nanmean(
+                [r.get("avg_final_output_tokens") for r in solved]
+            ),
             "total_input_tokens": sum(r.get("total_input_tokens", 0) for r in solved),
             "total_output_tokens": sum(r.get("total_output_tokens", 0) for r in solved),
         }
@@ -591,6 +606,152 @@ def _render_radar(
     )
 
 
+def _render_stacked_composition(
+    ctx: RunContext,
+    order: Sequence[str],
+    bucket_counts: Dict[str, Dict[str, int]],
+    bucket_pct: Dict[str, Dict[str, float]],
+    *,
+    path_base: Path,
+    style: Optional[StackedCompositionStyle] = None,
+) -> None:
+    """Vertical stacked-bar composition figure.
+
+    One bar per dataset; each bar is partitioned into colored segments, one
+    per bucket in ``order``.  Inspired by the Tülu 2 / RDS dataset-mix
+    figures: the goal is to make it visually obvious at a glance which
+    datasets are concentrated on a few buckets vs. spread evenly.
+
+    Modes:
+
+    * ``style.normalize=True`` (default) — every bar reaches 100 %.  Best
+      when datasets have very different sizes; emphasises *shape*.
+    * ``style.normalize=False`` — bars retain absolute task counts.  Useful
+      when the size differential is itself part of the story.
+
+    All typographic / color choices are owned by ``style``
+    (:class:`~rl_data.comparison.styles.StackedCompositionStyle`) so this
+    figure can be polished independently of the others.
+    """
+    if style is None:
+        style = default_stacked_style()
+
+    specs = ctx.specs
+    n_buckets = len(order)
+    if n_buckets == 0 or not specs:
+        return
+    colors = palette_colors(style.palette_name, n_buckets)
+
+    if style.normalize:
+        values: Dict[str, Dict[str, float]] = bucket_pct
+        ymax = 100.0 * 1.02
+    else:
+        values = {
+            s.name: {k: float(bucket_counts[s.name][k]) for k in order}
+            for s in specs
+        }
+        ymax = max(
+            (sum(values[s.name][k] for k in order) for s in specs),
+            default=0.0,
+        ) * 1.08
+
+    rc_overrides = {
+        "text.usetex": style.use_tex,
+        "font.family": style.font_family,
+        "font.serif": list(style.font_serif),
+        "font.size": style.font_size,
+        "axes.titlesize": style.title_size,
+        "axes.labelsize": style.axes_label_size,
+        "xtick.labelsize": style.tick_size,
+        "ytick.labelsize": style.tick_size,
+        "legend.fontsize": style.legend_size,
+        "axes.spines.top": style.show_top_right_spines,
+        "axes.spines.right": style.show_top_right_spines,
+    }
+
+    with plt.rc_context(rc_overrides):
+        fig, ax = plt.subplots(figsize=style.figsize)
+
+        x = np.arange(len(specs)) * (style.bar_width + style.bar_gap)
+        bottoms = np.zeros(len(specs), dtype=float)
+
+        for j, bucket in enumerate(order):
+            seg = np.array([values[s.name][bucket] for s in specs], dtype=float)
+            color = colors[j]
+            bars = ax.bar(
+                x, seg, width=style.bar_width, bottom=bottoms,
+                color=color, edgecolor=style.bar_edge_color,
+                linewidth=style.bar_edge_linewidth, label=bucket,
+            )
+            if style.annotate_segments:
+                text_color = (
+                    style.annotate_color_dark_bg
+                    if is_dark_color(color) else style.annotate_color_light_bg
+                )
+                for bar, v in zip(bars, seg):
+                    if v < style.annotate_min_pct:
+                        continue
+                    cx = bar.get_x() + bar.get_width() / 2
+                    cy = bar.get_y() + bar.get_height() / 2
+                    label = f"{v:.1f}%" if style.normalize else f"{int(round(v))}"
+                    ax.text(
+                        cx, cy, label, ha="center", va="center",
+                        fontsize=style.annotation_size,
+                        fontweight=style.annotation_weight,
+                        color=text_color,
+                    )
+            bottoms += seg
+
+        if style.annotate_total_above_bars and not style.normalize:
+            for xi, total in zip(x, bottoms):
+                ax.text(
+                    xi, total + ymax * 0.01, f"{int(round(total))}",
+                    ha="center", va="bottom",
+                    fontsize=style.annotation_size,
+                    color=style.annotate_color_light_bg,
+                )
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(
+            [s.display_name for s in specs],
+            rotation=style.xticklabel_rotation,
+            ha=style.xticklabel_ha,
+            rotation_mode="anchor",
+        )
+        ax.tick_params(axis="both", which="both", length=0)
+        for spine_name in ("left", "bottom"):
+            ax.spines[spine_name].set_color(style.spine_color)
+            ax.spines[spine_name].set_linewidth(style.spine_linewidth)
+
+        ax.set_ylim(0, ymax)
+        ax.set_ylabel(style.ylabel)
+        if style.xlabel:
+            ax.set_xlabel(style.xlabel)
+        ax.set_title(
+            style.title, pad=style.title_pad,
+            fontweight=style.title_weight, loc=style.title_loc,
+        )
+
+        handles, labels = ax.get_legend_handles_labels()
+        if style.legend_reverse:
+            handles = handles[::-1]
+            labels = labels[::-1]
+        ax.legend(
+            handles, labels,
+            loc=style.legend_loc, bbox_to_anchor=style.legend_bbox,
+            frameon=style.legend_frameon, ncol=style.legend_ncol,
+            title=style.legend_title,
+        )
+
+        fig.tight_layout()
+        rows = _composition_csv_rows(specs, order, bucket_counts, bucket_pct)
+        save_fig_with_data(
+            fig, rows, path_base,
+            fieldnames=["dataset", "bucket", "n_tasks", "pct_tasks"],
+            dpi=style.dpi, also_pdf=style.save_pdf,
+        )
+
+
 def _render_grouped_bar(
     ctx: RunContext,
     order: Sequence[str],
@@ -623,13 +784,16 @@ def _compose_axis(
     *,
     main_base: Optional[Path] = None,
     radar_base: Optional[Path] = None,
+    stacked_base: Optional[Path] = None,
+    stacked_style: Optional[StackedCompositionStyle] = None,
     appendix_base: Optional[Path] = None,
     ridgeline_title: str,
     radar_title: Optional[str] = None,
+    stacked_title: Optional[str] = None,
     bar_title: Optional[str] = None,
     xlabel: str,
 ) -> Dict[str, Any]:
-    """Compute counts + render any subset of {ridgeline, radar, grouped-bar}.
+    """Compute counts + render any subset of {ridgeline, radar, stacked, bar}.
 
     Always returns a summary dict with counts / pct / balance / chi2 — the
     caller decides which figures to render.
@@ -645,6 +809,16 @@ def _compose_axis(
         _render_radar(
             ctx, order, bucket_pct,
             path_base=radar_base, title=radar_title or ridgeline_title,
+        )
+    if stacked_base is not None:
+        style = stacked_style or default_stacked_style()
+        if stacked_title is not None:
+            style.title = stacked_title
+        if style.xlabel is None and xlabel:
+            style.xlabel = None  # leave x-axis unlabeled — datasets are obvious
+        _render_stacked_composition(
+            ctx, order, bucket_counts, bucket_pct,
+            path_base=stacked_base, style=style,
         )
     if appendix_base is not None:
         _render_grouped_bar(
@@ -699,16 +873,29 @@ def module_composition(ctx: RunContext) -> Dict[str, Any]:
     """
     out: Dict[str, Any] = {}
 
-    # ── Domain: ridgeline + radar (main) + classic bar (appendix) ──
+    # ── Domain: ridgeline + radar + stacked (main) + classic bar (appendix) ──
+    #
+    # The stacked figure (fig6) is the "headline" composition view for the
+    # paper.  Style is fully configurable via StackedCompositionStyle in
+    # rl_data/comparison/styles.py — each plot can be polished independently.
+    # Palette can also be overridden at run time via STACKED_PALETTE env var.
+    import os
+    palette_name = os.environ.get("STACKED_PALETTE", "anthropic_book")
     out["domain"] = _compose_axis(
         ctx, "domain",
         getter=lambda tj: effective_domain(tj),
         order=DOMAINS_ORDER,
         main_base=ctx.main_dir / "fig3_composition_domain_ridgeline",
         radar_base=ctx.main_dir / "fig4_composition_domain_radar",
+        stacked_base=ctx.main_dir / "fig6_composition_domain_stacked",
+        stacked_style=default_stacked_style(
+            title="Domain composition",
+            palette_name=palette_name,
+        ),
         appendix_base=ctx.appendix_dir / "composition_domain_bar",
         ridgeline_title="Domain composition (ridgeline)",
         radar_title="Domain composition (radar)",
+        stacked_title="Domain composition",
         bar_title="Domain composition (grouped bar)",
         xlabel="domain",
     )

@@ -86,25 +86,94 @@ def _estimate_cost(input_tokens: int, output_tokens: int,
     return (input_tokens * pi + output_tokens * po) / 1e6
 
 
+def _msg_words(msg: Dict[str, Any]) -> int:
+    """Total word count in a single chat message (content + tool-call args)."""
+    content = msg.get("content")
+    wc = len(content.split()) if content else 0
+    for tc in (msg.get("tool_calls") or []):
+        args = tc.get("function", {}).get("arguments", "")
+        if args:
+            wc += len(args.split())
+    return wc
+
+
 def _count_words_in_messages(
     messages: List[Dict[str, Any]],
 ) -> tuple:
     """Return (input_words, output_words) across all messages."""
     inp, out = 0, 0
     for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content")
-        wc = len(content.split()) if content else 0
-        tc_wc = 0
-        for tc in (msg.get("tool_calls") or []):
-            args = tc.get("function", {}).get("arguments", "")
-            if args:
-                tc_wc += len(args.split())
-        if role == "assistant":
-            out += wc + tc_wc
+        w = _msg_words(msg)
+        if msg.get("role") == "assistant":
+            out += w
         else:
-            inp += wc + tc_wc
+            inp += w
     return inp, out
+
+
+def _peak_context_words(
+    messages: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Decompose a run's messages into turn-level word counts.
+
+    Returns a dict with:
+      - sys_user_w:     words in leading system + first user message(s)
+      - turn_pair_words: per-turn words of (assistant_i + tool_i) for i<T
+                         (the new content added to the history after each
+                         assistant turn; tool/user content that follows is
+                         attributed to the preceding assistant's turn-pair)
+      - last_asst_w:    words in the final assistant message
+      - prompt_sum_w:   total "input" words summed over all T per-turn prompts
+                        (each prompt = system+user + all prior turn-pairs)
+      - completion_sum_w: total assistant words across all T turns
+      - num_turns:      T (= number of assistant messages)
+    Returns None if the run has no assistant message.
+    """
+    i = 0
+    sys_user_w = 0
+    while i < len(messages) and messages[i].get("role") in ("system", "user"):
+        sys_user_w += _msg_words(messages[i])
+        i += 1
+
+    turn_pair_words: List[int] = []
+    current_asst_w = 0
+    current_extra_w = 0
+    saw_asst = False
+    asst_word_list: List[int] = []
+
+    for m in messages[i:]:
+        role = m.get("role")
+        w = _msg_words(m)
+        if role == "assistant":
+            if saw_asst:
+                turn_pair_words.append(current_asst_w + current_extra_w)
+                current_extra_w = 0
+            current_asst_w = w
+            asst_word_list.append(w)
+            saw_asst = True
+        else:
+            if saw_asst:
+                current_extra_w += w
+    if saw_asst:
+        turn_pair_words.append(current_asst_w + current_extra_w)
+
+    T = len(asst_word_list)
+    if T == 0:
+        return None
+
+    prompt_sum_w = T * sys_user_w
+    for j in range(T - 1):
+        prompt_sum_w += (T - 1 - j) * turn_pair_words[j]
+    completion_sum_w = sum(asst_word_list)
+
+    return {
+        "sys_user_w": sys_user_w,
+        "turn_pair_words": turn_pair_words,
+        "last_asst_w": asst_word_list[-1],
+        "prompt_sum_w": prompt_sum_w,
+        "completion_sum_w": completion_sum_w,
+        "num_turns": T,
+    }
 
 
 def _load_summary(summary_path: Path, record: Dict[str, Any]) -> None:
@@ -125,6 +194,7 @@ def _load_summary(summary_path: Path, record: Dict[str, Any]) -> None:
     turns_per_run = []
     input_words_per_run = []
     output_words_per_run = []
+    peak_info_per_run: List[Optional[Dict[str, Any]]] = []
     for r in sol.get("results", []):
         msgs = r.get("messages", [])
         n_turns = sum(1 for m in msgs if m.get("role") == "tool")
@@ -132,6 +202,7 @@ def _load_summary(summary_path: Path, record: Dict[str, Any]) -> None:
         iw, ow = _count_words_in_messages(msgs)
         input_words_per_run.append(iw)
         output_words_per_run.append(ow)
+        peak_info_per_run.append(_peak_context_words(msgs))
 
     n = len(turns_per_run)
     total_in_w = sum(input_words_per_run)
@@ -182,6 +253,46 @@ def _load_summary(summary_path: Path, record: Dict[str, Any]) -> None:
         record["total_input_tokens"] + record["total_output_tokens"]
     )
     record["avg_tokens_est"] = record["total_tokens_est"] // n if n else 0
+
+    # ── Per-run peak-context estimates (final turn input / output, initial
+    # input), averaged across runs for this task.  Stored tokens-per-word is
+    # calibrated per-run to the recorded API usage when available so that
+    # summing per-turn inputs reproduces the recorded per-run prompt_tokens.
+    initial_in_sum = 0.0
+    peak_in_sum = 0.0
+    final_out_sum = 0.0
+    n_peak = 0
+    for r, info in zip(sol.get("results", []), peak_info_per_run):
+        if not info:
+            continue
+        tpw: Optional[float] = None
+        ru = r.get("usage") or {}
+        pt = ru.get("prompt_tokens", 0) or 0
+        ct = ru.get("completion_tokens", 0) or 0
+        denom_w = info["prompt_sum_w"] + info["completion_sum_w"]
+        if (pt + ct) > 0 and denom_w > 0:
+            tpw = (pt + ct) / denom_w
+        elif denom_w > 0:
+            tpw = _TOK_PER_WORD
+        if tpw is None:
+            continue
+        T = info["num_turns"]
+        sys_user_w = info["sys_user_w"]
+        pre_last_w = sys_user_w + sum(info["turn_pair_words"][: T - 1])
+        initial_in_sum += sys_user_w * tpw
+        peak_in_sum += pre_last_w * tpw
+        final_out_sum += info["last_asst_w"] * tpw
+        n_peak += 1
+
+    if n_peak:
+        record["avg_initial_input_tokens"] = initial_in_sum / n_peak
+        record["avg_peak_input_tokens"] = peak_in_sum / n_peak
+        record["avg_final_output_tokens"] = final_out_sum / n_peak
+    else:
+        record["avg_initial_input_tokens"] = 0.0
+        record["avg_peak_input_tokens"] = 0.0
+        record["avg_final_output_tokens"] = 0.0
+
     record["has_solutions"] = True
 
 
@@ -238,6 +349,9 @@ def load_tasks(
             total_input_tokens=0, total_output_tokens=0,
             reasoning_tokens=0,
             total_tokens_est=0, avg_tokens_est=0,
+            avg_initial_input_tokens=0.0,
+            avg_peak_input_tokens=0.0,
+            avg_final_output_tokens=0.0,
             tokens_source="none",
             has_solutions=False,
             **{"pass@1": None, "pass@8": None},

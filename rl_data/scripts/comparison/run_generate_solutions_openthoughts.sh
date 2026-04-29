@@ -25,9 +25,14 @@ set -euo pipefail
 TASKS_DIR="rl_data/output/tasks_openthoughts_agent_rl"
 # Override via env (see run_generate_solutions_et.sh header for examples).
 MODEL="${MODEL:-gemini/gemini-3-flash-preview}"
-NUM_SOLUTIONS=1              # match ET + 10k comparison runs
+# NUM_SOLUTIONS controls pass@k breadth.  run_n_solutions() returns pass@k for
+# every k in [1..N], so NUM_SOLUTIONS=8 gives both pass@1 and pass@8 in one run.
+# Default 1 matches the 10k gemini run; override via env (e.g. NUM_SOLUTIONS=8).
+NUM_SOLUTIONS="${NUM_SOLUTIONS:-1}"
 MAX_ACTIONS=16
-MAX_TOKENS=65536
+# MAX_TOKENS is the per-turn generation cap.  Gemini default 65536; auto-capped
+# to VLLM_MAX_LEN-safety_margin when LAUNCH_VLLM=1 (see _vllm_wait_ready_local).
+MAX_TOKENS="${MAX_TOKENS:-65536}"
 NUM_TASKS=999999
 START_AT=0
 SOLUTION_TEMPERATURE=0.7
@@ -44,19 +49,27 @@ DISABLE_TERMINAL_LOG=0
 SAMPLE_SIZE="${SAMPLE_SIZE:-0}"
 SAMPLE_SEED="${SAMPLE_SEED:-0}"
 
-WORKERS=12
-NUM_POOL_WORKERS=16
+# WORKERS = concurrent TASKS processed at once.  NUM_POOL_WORKERS = concurrent
+# solutions/env operations within a single task.  Both env-overridable.
+WORKERS="${WORKERS:-12}"
+NUM_POOL_WORKERS="${NUM_POOL_WORKERS:-16}"
 # --------------------------------
 
-_MODEL_TAG=$(echo "$MODEL" | tr '/' '_')
 _RUN_TS=$(date -u +%Y%m%d_%H%M%S)
-TERMINAL_LOG="${TASKS_DIR}/logs/${_MODEL_TAG}_${_RUN_TS}.log"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 cd "$PROJECT_ROOT"
 mkdir -p logs
+
+# In-job vLLM bring-up. No-op unless LAUNCH_VLLM=1. See run_generate_solutions_et.sh
+# header for the rationale; we kick it off pre-SIF-build so weight loading
+# overlaps with the (slow) base SIF build, then block on readiness right
+# before the solver call.
+# shellcheck source=./_vllm_local.sh
+source "$SCRIPT_DIR/_vllm_local.sh"
+_vllm_start_local
 
 export APPTAINER_DOCKER_USERNAME="${APPTAINER_DOCKER_USERNAME:?Set APPTAINER_DOCKER_USERNAME before running}"
 export APPTAINER_DOCKER_PASSWORD="${APPTAINER_DOCKER_PASSWORD:?Set APPTAINER_DOCKER_PASSWORD before running}"
@@ -167,6 +180,11 @@ else
   echo "=== OT base SIF already present: $BASE_OT_SIF (version=${BASE_OT_SIF_VERSION}, skipping build) ==="
 fi
 
+_vllm_wait_ready_local
+
+_MODEL_TAG=$(echo "$MODEL" | tr '/' '_')
+TERMINAL_LOG="${TASKS_DIR}/logs/${_MODEL_TAG}_${_RUN_TS}.log"
+
 EXTRA_ARGS=()
 if [[ "${FORCE_RERUN:-0}" == "1" ]]; then
   EXTRA_ARGS+=(--force-rerun)
@@ -186,7 +204,7 @@ if [[ "${DISABLE_TERMINAL_LOG:-0}" != "1" ]]; then
   EXTRA_ARGS+=(--terminal-log "$TL")
 fi
 
-echo "=== OpenThoughts-Agent-v1-RL comparison run: WORKERS=${WORKERS}, NUM_SOLUTIONS=${NUM_SOLUTIONS} ==="
+echo "=== OpenThoughts-Agent-v1-RL comparison run: MODEL=${MODEL}, WORKERS=${WORKERS}, NUM_SOLUTIONS=${NUM_SOLUTIONS} ==="
 echo "=== Concurrent containers: $(( WORKERS * NUM_SOLUTIONS )) ==="
 
 uv run python -m rl_data.generate_solutions \

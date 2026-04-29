@@ -187,30 +187,48 @@ class OpenThoughtsAgentRLAdapter(Adapter):
     default_dst = "rl_data/output/tasks_openthoughts_agent_rl"
 
     # ---------- Fetch: download + extract ---------------------------------
-    def fetch(self, cache_dir: Path, *, revision: Optional[str] = None) -> Path:
+    def fetch(self, cache_dir: Path, *, revision: Optional[str] = None,
+              skip_download: bool = False) -> Path:
         """Download ``tasks.parquet`` into ``cache_dir`` and extract rows.
 
         Returns the path to the directory holding per-task dirs. Safe to call
         repeatedly; already-extracted task dirs are reused.
+
+        If ``skip_download`` is True we use the parquet file already present
+        in the local HF cache instead of contacting the Hub. The validation
+        and re-extract logic below still runs, so corrupted local extracts
+        self-heal even when the network is offline.
         """
         try:
-            from huggingface_hub import hf_hub_download
             import pyarrow.parquet as pq
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError(
-                "openthoughts_agent_rl adapter requires huggingface_hub and "
-                "pyarrow. Install them in your environment."
+                "openthoughts_agent_rl adapter requires pyarrow. "
+                "Install it in your environment."
             ) from exc
 
         cache_dir.mkdir(parents=True, exist_ok=True)
-        logger.info("Downloading %s/tasks.parquet ...", self.hf_repo_id)
-        pq_path = Path(hf_hub_download(
-            repo_id=self.hf_repo_id,
-            filename="tasks.parquet",
-            repo_type="dataset",
-            revision=revision,
-            cache_dir=str(cache_dir / "_hf_cache"),
-        ))
+        if skip_download:
+            # Locate the parquet that a previous fetch downloaded.
+            hf_root = cache_dir / "_hf_cache"
+            candidates = list(hf_root.rglob("tasks.parquet")) if hf_root.exists() else []
+            if not candidates:
+                raise RuntimeError(
+                    f"--skip-download requested but no tasks.parquet found in "
+                    f"{hf_root}. Run once without --skip-download first."
+                )
+            pq_path = candidates[0]
+            logger.info("Skipping download; using cached parquet %s", pq_path)
+        else:
+            from huggingface_hub import hf_hub_download
+            logger.info("Downloading %s/tasks.parquet ...", self.hf_repo_id)
+            pq_path = Path(hf_hub_download(
+                repo_id=self.hf_repo_id,
+                filename="tasks.parquet",
+                repo_type="dataset",
+                revision=revision,
+                cache_dir=str(cache_dir / "_hf_cache"),
+            ))
 
         extracted = cache_dir / "extracted"
         extracted.mkdir(parents=True, exist_ok=True)
@@ -245,10 +263,32 @@ class OpenThoughtsAgentRLAdapter(Adapter):
                 logger.warning("row %d (%s): unsafe target, skipping", i, rel_path)
                 continue
 
-            # Skip if already extracted (fast reruns after partial failures).
+            # Skip if already extracted AND complete. We previously trusted a
+            # `.extracted_ok` marker alone, but observed that empty-file seeds
+            # (e.g. ``environment/seeds/alpha/one.example.com``, size 0) and
+            # other small files can disappear from /gpfs scratch between runs
+            # (filesystem maintenance, accidental cleanup, etc.) while the
+            # marker survives. To self-heal, validate that EVERY file the tar
+            # archive declares is present on disk; if any are missing, wipe and
+            # re-extract.
             marker = dest / ".extracted_ok"
-            if marker.exists():
+            try:
+                with tarfile.open(fileobj=io.BytesIO(bytes(data)), mode="r:*") as tf:
+                    expected_files = [m.name for m in tf.getmembers() if m.isfile()]
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not read tar header for %s: %s", rel_path, exc)
                 continue
+
+            if marker.exists():
+                missing = [f for f in expected_files if not (dest / f).exists()]
+                if not missing:
+                    continue
+                logger.warning(
+                    "cache corruption detected for %s (%d/%d files missing, "
+                    "e.g. %r); re-extracting",
+                    rel_path, len(missing), len(expected_files), missing[:3],
+                )
+
             if dest.exists():
                 shutil.rmtree(dest)
             dest.mkdir(parents=True, exist_ok=True)
@@ -379,16 +419,14 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
     adapter = OpenThoughtsAgentRLAdapter()
 
-    if args.skip_download:
-        snapshot = (args.cache_dir / "extracted").resolve()
-        logger.info("Skipping download; using %s", snapshot)
-        if not snapshot.exists():
-            logger.error(
-                "Extracted dir %s does not exist; cannot --skip-download on a "
-                "cold cache. Run once without the flag first.", snapshot)
-            sys.exit(1)
-    else:
-        snapshot = adapter.fetch(args.cache_dir.resolve(), revision=args.revision)
+    # Always go through fetch() so the validate-and-self-heal logic runs even
+    # when --skip-download is set; fetch() will use the locally-cached parquet
+    # and skip the HF Hub download in that case.
+    snapshot = adapter.fetch(
+        args.cache_dir.resolve(),
+        revision=args.revision,
+        skip_download=args.skip_download,
+    )
 
     converted, skipped = adapter.convert_all(
         snapshot, args.dst.resolve(),

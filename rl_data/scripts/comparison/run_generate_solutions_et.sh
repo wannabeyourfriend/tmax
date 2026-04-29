@@ -29,9 +29,17 @@ TASKS_DIR="rl_data/output/tasks_endless_terminals"
 #   Ollama:      MODEL="ollama_chat/qwen2.5-coder:7b" \
 #                OLLAMA_API_BASE="http://localhost:11434"
 MODEL="${MODEL:-gemini/gemini-3-flash-preview}"
-NUM_SOLUTIONS=1              # match 10k run
+# NUM_SOLUTIONS controls pass@k breadth.  run_n_solutions() returns pass@k for
+# every k in [1..N], so NUM_SOLUTIONS=8 gives both pass@1 and pass@8 in one run.
+# Default 1 matches the 10k gemini run; override via env (e.g. NUM_SOLUTIONS=8).
+NUM_SOLUTIONS="${NUM_SOLUTIONS:-1}"
 MAX_ACTIONS=16
-MAX_TOKENS=65536
+# MAX_TOKENS is the per-turn generation cap.  65536 was chosen for gemini-3
+# flash (1M-token context).  For a local vLLM with --max-model-len=32768 it
+# would be rejected with `max_tokens > max_model_len`, so the helper's
+# _vllm_wait_ready_local auto-caps this when LAUNCH_VLLM=1.  Override here
+# via env (e.g. MAX_TOKENS=8192) when running against a local model.
+MAX_TOKENS="${MAX_TOKENS:-65536}"
 NUM_TASKS=999999
 START_AT=0
 SOLUTION_TEMPERATURE=0.7
@@ -50,19 +58,29 @@ DISABLE_TERMINAL_LOG=0
 SAMPLE_SIZE="${SAMPLE_SIZE:-0}"
 SAMPLE_SEED="${SAMPLE_SEED:-0}"
 
-WORKERS=12
-NUM_POOL_WORKERS=16
+# WORKERS = concurrent TASKS processed at once.  NUM_POOL_WORKERS = concurrent
+# solutions/env operations within a single task.  Both env-overridable so you
+# can crank or shrink them per run (e.g. to verify across-task parallelism).
+WORKERS="${WORKERS:-12}"
+NUM_POOL_WORKERS="${NUM_POOL_WORKERS:-16}"
 # --------------------------------
 
-_MODEL_TAG=$(echo "$MODEL" | tr '/' '_')
 _RUN_TS=$(date -u +%Y%m%d_%H%M%S)
-TERMINAL_LOG="${TASKS_DIR}/logs/${_MODEL_TAG}_${_RUN_TS}.log"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 cd "$PROJECT_ROOT"
 mkdir -p logs
+
+# In-job vLLM bring-up. No-op unless LAUNCH_VLLM=1. We kick it off here so
+# the slow SIF base build below overlaps with vLLM weight loading; we then
+# block on readiness right before the solver call (see _vllm_wait_ready_local).
+# When enabled, the helper will (later) set MODEL=hosted_vllm/$VLLM_MODEL +
+# HOSTED_VLLM_API_BASE so the solver routes through the local server.
+# shellcheck source=./_vllm_local.sh
+source "$SCRIPT_DIR/_vllm_local.sh"
+_vllm_start_local
 
 export APPTAINER_DOCKER_USERNAME="${APPTAINER_DOCKER_USERNAME:?Set APPTAINER_DOCKER_USERNAME before running}"
 export APPTAINER_DOCKER_PASSWORD="${APPTAINER_DOCKER_PASSWORD:?Set APPTAINER_DOCKER_PASSWORD before running}"
@@ -162,6 +180,14 @@ else
   echo "=== ET base SIF already present: $BASE_UBUNTU_SIF (version=${BASE_UBUNTU_SIF_VERSION}, skipping build) ==="
 fi
 
+# Block until the in-job vLLM server is ready (no-op when LAUNCH_VLLM!=1).
+# Also (re)exports MODEL/HOSTED_VLLM_API_BASE/OPENAI_API_KEY for the solver.
+_vllm_wait_ready_local
+
+# Derive model-tagged paths NOW (after the helper may have rewritten MODEL).
+_MODEL_TAG=$(echo "$MODEL" | tr '/' '_')
+TERMINAL_LOG="${TASKS_DIR}/logs/${_MODEL_TAG}_${_RUN_TS}.log"
+
 EXTRA_ARGS=()
 if [[ "${FORCE_RERUN:-0}" == "1" ]]; then
   EXTRA_ARGS+=(--force-rerun)
@@ -181,7 +207,7 @@ if [[ "${DISABLE_TERMINAL_LOG:-0}" != "1" ]]; then
   EXTRA_ARGS+=(--terminal-log "$TL")
 fi
 
-echo "=== ET comparison run: WORKERS=${WORKERS}, NUM_SOLUTIONS=${NUM_SOLUTIONS} ==="
+echo "=== ET comparison run: MODEL=${MODEL}, WORKERS=${WORKERS}, NUM_SOLUTIONS=${NUM_SOLUTIONS} ==="
 echo "=== Concurrent containers: $(( WORKERS * NUM_SOLUTIONS )) ==="
 
 uv run python -m rl_data.generate_solutions \
