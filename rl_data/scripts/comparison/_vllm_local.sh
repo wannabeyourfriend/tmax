@@ -225,28 +225,35 @@ _vllm_start_local() {
   local dtype="${VLLM_DTYPE:-bfloat16}"
 
   # ------------------------------------------------------------------
-  # Detect the Qwen3.5 family.  Qwen3.5 (released 2026-Mar) is a multimodal
-  # VLM with a hybrid linear/full attention arch (Gated DeltaNet + sparse
-  # MoE), and needs three vLLM-level toggles relative to Qwen3:
-  #   1. vLLM >= 0.19.0 (per the upstream `qwen3.5/requirements.txt`-style
-  #      constraint, "vllm>=0.19.0; platform_system != 'Darwin'").  Our
-  #      existing 0.19.1 pin already satisfies that, so no nightly needed
-  #      by default.  Users who want main-branch features can still opt in
-  #      via VLLM_NIGHTLY=1.
-  #   2. --tool-call-parser qwen3_coder (Qwen3.5 uses a different tool-call
-  #      format than Qwen3's hermes format).
+  # Detect the Qwen3.5 *architecture family*: the set of VLMs sharing the
+  # `qwen3_5` HF arch tag (Gated DeltaNet + sparse MoE / hybrid linear/full
+  # attention).  Released members so far:
+  #   * Qwen3.5-{4B,9B,27B,397B-A17B}  (2026-Mar)
+  #   * Qwen3.6-{27B,35B-A3B}          (2026-Apr; same arch tag, same
+  #     vLLM serving requirements per the upstream model card recipe).
+  # All members need the same three vLLM-level toggles relative to Qwen3:
+  #   1. vLLM >= 0.19.0 (per "vllm>=0.19.0; platform_system != 'Darwin'"
+  #      constraint shared by Qwen3.5 + Qwen3.6 model cards).  Our 0.19.1
+  #      pin already satisfies that, so no nightly needed by default.
+  #      Opt into nightly via VLLM_NIGHTLY=1 for bleeding-edge features.
+  #   2. --tool-call-parser qwen3_coder (different tool-call format than
+  #      Qwen3's hermes format).
   #   3. --language-model-only (skip the vision tower so all GPU memory
   #      goes to KV cache for our text-only agent loop).
-  # We detect via substring "Qwen3.5" (case-sensitive; matches the official
-  # HF repo IDs) and switch defaults accordingly.
+  # We detect via a regex matching `qwen3.[5-9]` (case-insensitive on the
+  # whole id) so future qwen3_5-arch releases (Qwen3.7, ...) are picked
+  # up automatically without script edits.  If a future Qwen drops the
+  # qwen3_5 arch tag, set VLLM_TOOL_CALL_PARSER / VLLM_LANGUAGE_MODEL_ONLY
+  # explicitly to override.
   # ------------------------------------------------------------------
   local is_qwen3_5=0
-  if [[ "$_VLLM_MODEL" == *Qwen3.5* ]] || [[ "$_VLLM_MODEL" == *qwen3.5* ]]; then
+  if [[ "${_VLLM_MODEL,,}" =~ qwen3\.[5-9] ]]; then
     is_qwen3_5=1
   fi
 
-  # Tool-call parser: hermes for Qwen2.5/Qwen3, qwen3_coder for Qwen3.5
-  # and Qwen3-Coder.  `${VAR-default}` (no colon) respects empty-string opt-out.
+  # Tool-call parser: hermes for Qwen2.5/Qwen3, qwen3_coder for the
+  # Qwen3.5 arch family (Qwen3.5 / Qwen3.6 / ...) and Qwen3-Coder.
+  # `${VAR-default}` (no colon) respects empty-string opt-out.
   local default_tool_call_parser="hermes"
   if [[ "$is_qwen3_5" == "1" ]] || [[ "$_VLLM_MODEL" == *Qwen3-Coder* ]]; then
     default_tool_call_parser="qwen3_coder"
@@ -420,7 +427,7 @@ PYEOF
   echo "  reason parser : ${reasoning_parser:-<disabled>}"
   echo "  enforce_eager : $enforce_eager"
   echo "  no_thinking   : $disable_thinking"
-  echo "  qwen3.5 mode  : is_qwen3_5=$is_qwen3_5  language_only=$language_model_only  nightly=$nightly"
+  echo "  qwen3.5+ arch : is_qwen3_5=$is_qwen3_5  language_only=$language_model_only  nightly=$nightly"
   echo "  vllm version  : ${vllm_version:-<latest>}"
   echo "  log           : $_VLLM_LOG"
   echo "  cmd           : ${cmd[*]}"

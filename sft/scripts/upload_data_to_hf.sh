@@ -72,8 +72,18 @@ def main():
     #   data/{config_name}/{split}-*.parquet
     operations = []
 
-    # Clear stale data/ and README from previous uploads
-    operations.append(CommitOperationDelete(path_in_repo="data/", is_folder=True))
+    # Clear stale `data/` only if the folder actually exists -- otherwise
+    # the commit fails with `Entry Not Found ... A file with the name "data"
+    # does not exist` on a freshly created repo (rolling back the whole
+    # commit, including the parquets we just uploaded).
+    try:
+        existing_files = api.list_repo_files(repo_id, repo_type="dataset")
+    except Exception as e:
+        print(f"  warn: could not list existing files ({e}); skipping cleanup", file=sys.stderr)
+        existing_files = []
+    if any(f.startswith("data/") for f in existing_files):
+        print("  Clearing stale `data/` from previous upload")
+        operations.append(CommitOperationDelete(path_in_repo="data/", is_folder=True))
 
     config_names = []
     for pf in parquet_files:

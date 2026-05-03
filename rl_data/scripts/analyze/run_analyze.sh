@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # ---- Parameters (edit here) ----
-TASKS_DIR="/gpfs/scrubbed/osey/tmax/rl_data/output/tasks_openthoughts_agent_rl"
+TASKS_DIR="/gpfs/scrubbed/osey/tmax/rl_data/output/tasks_skill_tax_20260324_1k"
 PLOTS_DIR=""   # leave empty to default to <TASKS_DIR>/analysis
 MODEL=""       # e.g. "gemini/gemini-3-flash-preview"; leave empty to auto-discover all models
 # --------------------------------

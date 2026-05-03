@@ -57,33 +57,89 @@ def _resolve_base(domain: str, base_sifs_dir: Optional[Path] = None) -> Path:
 # Def → delta parser: extract task-specific setup from a full .def
 # ---------------------------------------------------------------------------
 
-_PREAMBLE_PATTERNS: list[re.Pattern] = [
+# Patterns that are ALWAYS safe to strip from a per-task delta -- every
+# domain base SIF handles these (Bootstrap/From/%post header, useradd, the
+# canonical chmod /home/user, etc.).
+#
+# IMPORTANT: the `apt-get update` regex below is anchored to end-of-line so
+# it only strips BARE `apt-get update` -- chained forms like
+# `apt-get update && apt-get install -y rustc bubblewrap` are left for the
+# heavy-base check to handle (we don't want to strip the install half on
+# domains whose base lacks the requested package).
+_UNIVERSAL_PREAMBLE_PATTERNS: list[re.Pattern] = [
     re.compile(r"^\s*Bootstrap\s*:", re.IGNORECASE),
     re.compile(r"^\s*From\s*:", re.IGNORECASE),
     re.compile(r"^\s*%post\b"),
     re.compile(r"^\s*export\s+DEBIAN_FRONTEND\s*="),
-    re.compile(r"^\s*apt-get\s+update"),
+    re.compile(r"^\s*apt-get\s+update\s*(?:-y\s*)?$"),  # bare update only
     re.compile(r"^\s*pip3?\s+install\s+pytest\s*$"),
     re.compile(r"^\s*useradd\b"),
     re.compile(r"^\s*chmod\s+.*(/home/user|777|755)"),
     re.compile(r"^\s*%environment\b"),
     re.compile(r"^\s*export\s+(LC_ALL|LANG)\s*="),
-    # Rust/Go env vars and installers — already in base images
+    # Cleanup lines that write to system dirs
+    re.compile(r"^\s*rm\s+-rf\s+/var/lib/apt"),
+]
+
+# Patterns that are redundant ONLY when the resolved base SIF already has a
+# heavy toolchain installed -- i.e. the bases for `software_engineering` and
+# `debugging` (see rl_data/containers/base_*.def).  Both of those bases
+# install python3+pip+pytest, gcc/g++/make, build-essential, AND rust+go
+# via apt at build time, so the corresponding install/installer lines in a
+# task's %post are no-ops.
+#
+# For the OTHER 7 domain bases (file_operations, data_querying, data_science,
+# data_processing, scientific_computing, security, system_administration)
+# the task's `apt-get install -y rustc ...`, `curl rustup.rs | sh`,
+# `wget go*.tar.gz`, `export RUSTUP_HOME=...`, etc. MUST stay in the delta
+# so the task can bring its own toolchain.
+#
+# Stripping these unconditionally was the bug that caused both the
+# `rustc: command not found` errors AND the cases where the apt-install
+# line that actually installed `rustc` got dropped (see task_000020_c5750457
+# whose container.def has `apt-get install -y python3 python3-pip rustc
+# bubblewrap` -- the whole install was lost).
+_HEAVY_BASE_PREAMBLE_PATTERNS: list[re.Pattern] = [
+    # Rust/Go env vars + toolchain installers
     re.compile(r"^\s*export\s+(RUSTUP_HOME|CARGO_HOME|GOPATH|GOROOT|PATH)\s*="),
     re.compile(r"^\s*curl\s+.*rustup\.rs", re.IGNORECASE),
     re.compile(r"^\s*curl\s+.*sh\.rustup\.rs", re.IGNORECASE),
     re.compile(r"^\s*(wget|curl)\s+.*go\d+\.\d+.*\.tar\.gz"),
     re.compile(r"^\s*tar\s+.*-C\s+/usr/local\b"),
     re.compile(r"^\s*ln\s+-s[f]?\s+.*/usr/local/"),
-    # Cleanup lines that write to system dirs
-    re.compile(r"^\s*rm\s+-rf\s+/var/lib/apt"),
+    # apt-get install / chained `update && install` lines.  These are the
+    # primary way tasks bring in extra packages on top of the base.  Strip
+    # only on heavy-toolchain bases where they're nearly always redundant.
+    re.compile(r"^\s*apt-get\s+(install|update)"),
 ]
 
-_APT_GET_RE = re.compile(r"^\s*apt-get\s+(install|update)")
+# Resolved-base domains whose .def installs rust+go AND a broad apt
+# toolchain (verified against rl_data/containers/base_software_engineering.def
+# + base_debugging.def).  Bump this set if/when another base adds rust+go.
+# Kept the historical name `_DOMAINS_WITH_RUST_GO` to minimise downstream
+# diffs; semantically it now means "domains whose base is heavy enough that
+# we can safely strip apt-installs / rust+go installers from per-task deltas."
+_DOMAINS_WITH_RUST_GO: frozenset[str] = frozenset({"software_engineering", "debugging"})
 
 
-def _is_preamble_line(line: str) -> bool:
-    return any(p.search(line) for p in _PREAMBLE_PATTERNS)
+def _is_preamble_line(line: str, base_domain: str) -> bool:
+    """Return True if ``line`` should be stripped from a delta running on top
+    of ``base_<base_domain>.sif``.
+
+    Universal preamble (Bootstrap/From/useradd/...) is always stripped.
+    Heavy-base preamble (rust/go installers, `apt-get install`, etc.) is
+    stripped ONLY when the base SIF is one whose .def already covers those
+    -- otherwise they're kept so the task can bring its own toolchain or
+    install task-specific apt packages.
+    """
+    for p in _UNIVERSAL_PREAMBLE_PATTERNS:
+        if p.search(line):
+            return True
+    if base_domain in _DOMAINS_WITH_RUST_GO:
+        for p in _HEAVY_BASE_PREAMBLE_PATTERNS:
+            if p.search(line):
+                return True
+    return False
 
 
 def parse_def_to_delta(def_text: str, domain_hint: Optional[str] = None) -> tuple[str, str]:
@@ -96,6 +152,12 @@ def parse_def_to_delta(def_text: str, domain_hint: Optional[str] = None) -> tupl
 
     Falls back to *domain_hint* (from ``task.json``) or ``"software_engineering"``.
     """
+    # Resolve the resolved-base domain BEFORE the parsing loop, because the
+    # strip set is now domain-aware: rust/go installer lines are kept for
+    # bases without rust/go pre-installed.  See _is_preamble_line and
+    # _DOMAINS_WITH_RUST_GO above.
+    base_domain = domain_hint if domain_hint and domain_hint in BASE_IMAGES else "software_engineering"
+
     lines = def_text.split("\n")
 
     delta_lines: list[str] = []
@@ -119,13 +181,13 @@ def parse_def_to_delta(def_text: str, domain_hint: Optional[str] = None) -> tupl
             continue
 
         heredoc_match = re.search(r"<<\s*['\"]?(\w+)['\"]?", line)
-        if heredoc_match and not _is_preamble_line(line):
+        if heredoc_match and not _is_preamble_line(line, base_domain):
             in_heredoc = True
             heredoc_marker = heredoc_match.group(1)
             delta_lines.append(line)
             continue
 
-        if _is_preamble_line(line) or _APT_GET_RE.match(line):
+        if _is_preamble_line(line, base_domain):
             continue
 
         stripped = line.rstrip()
@@ -138,7 +200,6 @@ def parse_def_to_delta(def_text: str, domain_hint: Optional[str] = None) -> tupl
         delta_lines.pop()
 
     setup_body = "\n".join(delta_lines)
-    base_domain = domain_hint if domain_hint and domain_hint in BASE_IMAGES else "software_engineering"
 
     # Rewrite /tmp/ references to /home/user/.setup_tmp/ so temp files land on the
     # writable bind mount instead of fuse-overlayfs (which can EINVAL on file creation).

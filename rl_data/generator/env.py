@@ -454,6 +454,13 @@ class InteractiveContainerEnvironment:
             print(f"✅ Materialized writable /home/user at {dest}")
         return True, ""
 
+    # Wall-clock cap for running a per-task `_delta_setup.sh` inside the
+    # base SIF.  Some skill_tax tasks legitimately take >>600s here (large
+    # data fixture generation, slow compiles, optional rustup re-install on
+    # non-software_engineering bases, etc.).  Bumping to 30 min covers the
+    # long tail without letting truly-stuck deltas park forever.
+    _DELTA_SETUP_TIMEOUT_S = 1800
+
     def _apply_setup_delta(self, sif_for_exec: Path, setup_script: str) -> Tuple[bool, str]:
         """Run the task-specific setup script inside the container.
 
@@ -474,7 +481,10 @@ class InteractiveContainerEnvironment:
             str(sif_for_exec),
             "/bin/bash", str(script_path),
         ]
-        proc = subprocess.run(exec_cmd, capture_output=True, text=True, timeout=600)
+        proc = subprocess.run(
+            exec_cmd, capture_output=True, text=True,
+            timeout=self._DELTA_SETUP_TIMEOUT_S,
+        )
         if proc.returncode != 0:
             err = (proc.stdout or "") + (proc.stderr or "")
             return False, f"setup delta failed (exit {proc.returncode}): {err.strip()[-500:] or '(no output)'}"
