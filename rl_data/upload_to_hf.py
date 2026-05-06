@@ -3,6 +3,10 @@
 Uploads the raw task folder structure (task_*/*, analysis/*) AND a
 consolidated .parquet file so HuggingFace Dataset Viewer can preview
 the data directly on the web.
+
+``container.sif`` (Apptainer) is **never** uploaded — keep it local. RL training
+uses Docker from ``container.def`` + fixtures; publishing multi‑GB SIFs would
+bloat the Hub and duplicate what ``apptainer build`` can reproduce.
 """
 
 from __future__ import annotations
@@ -158,9 +162,12 @@ def _build_compact_staging(
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for td in task_dirs:
             for fpath in sorted(td.rglob("*")):
-                if fpath.is_file():
-                    arcname = str(fpath.relative_to(input_dir))
-                    zf.write(fpath, arcname)
+                if not fpath.is_file():
+                    continue
+                if fpath.name == "container.sif":
+                    continue
+                arcname = str(fpath.relative_to(input_dir))
+                zf.write(fpath, arcname)
 
     size_mb = zip_path.stat().st_size / (1024 * 1024)
     print(f"Created {zip_path.name} ({size_mb:.1f} MB, {len(task_dirs)} tasks)")

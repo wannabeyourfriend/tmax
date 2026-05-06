@@ -8,9 +8,13 @@ cd "$(dirname "$0")/../../.."
 # least one non-zero pass@k in their *_summary.json — i.e. tasks where
 # a solution has been tested and verified to work.
 #
+# ``container.sif`` is never uploaded (see rl_data.upload_to_hf).
+#
 # Usage:
 #   bash rl_data/scripts/upload/upload_data_to_hf_verified.sh
-#   bash rl_data/scripts/upload/upload_data_to_hf_verified.sh --input-dir rl_data/output/tasks_v2
+#   bash rl_data/scripts/upload/upload_data_to_hf_verified.sh \
+#       --input-dir rl_data/output/tasks_skill_tax_combined_20260506_legacy10k_new5k \
+#       --repo osieosie/tmax-tasks-skill-taxonomy-20260506-legacy10k-new5k-verified
 #   bash rl_data/scripts/upload/upload_data_to_hf_verified.sh --repo osieosie/tmax-rl-v2-verified --private
 #   bash rl_data/scripts/upload/upload_data_to_hf_verified.sh --no-parquet
 #

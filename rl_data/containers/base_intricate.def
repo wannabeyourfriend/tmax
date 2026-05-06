@@ -13,7 +13,17 @@ From: ubuntu:22.04
 # Apptainer-based solution-sampling efficient under WORKERS×NUM_SOLUTIONS
 # concurrency.
 #
-# Build cost: ~2-3 GB SIF (one-time, on a login or build node).
+# 2026-05-06 update: added v2-axis common deps after profiling the first
+# 2.2k combined-corpus solve and seeing 26%+ of agent commands time out at
+# the COMMAND_TIMEOUT cap because every (task, solution) replicated the
+# same heavy `apt install` in setup.sh. Profiled 300 v2 setup.sh files;
+# added the top non-baked apt packages (imagemagick, espeak, redis-server,
+# nginx, netcat-openbsd, openmpi, postgresql-client, mysql-client, postfix,
+# expect, inotify-tools) so setup.sh's redundant apt-install calls become
+# 1-2 s no-ops. Predicted impact: 2-3× total throughput on the combined
+# corpus by eliminating most setup-time timeouts.
+#
+# Build cost: ~3-4 GB SIF (one-time, on a login or build node).
 #
 # IMPORTANT: do NOT add inline `#` comments inside apt-get install line
 # continuations — bash treats them as terminators of the current command,
@@ -41,6 +51,16 @@ From: ubuntu:22.04
         upx-ucl binutils file xxd \
         libjpeg-dev libpng-dev libtiff-dev libwebp-dev \
         libfreetype6-dev liblapack-dev libopenblas-dev \
+        imagemagick \
+        espeak espeak-ng libespeak-ng-dev \
+        redis-server redis-tools \
+        nginx \
+        netcat-openbsd socat \
+        openmpi-bin libopenmpi-dev \
+        postgresql-client mariadb-client \
+        postfix mailutils \
+        expect inotify-tools \
+        unzip zip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
     # Core scientific Python stack — picks CPU-only torch via the dedicated
@@ -63,7 +83,8 @@ From: ubuntu:22.04
         biopython \
         beautifulsoup4 lxml \
         pyinstaller cython pybind11 cffi \
-        sympy networkx cryptography
+        sympy networkx cryptography \
+        redis psycopg2-binary pyserial paramiko
 
     pip3 install --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cpu \

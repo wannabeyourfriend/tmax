@@ -38,6 +38,7 @@ canonical container destination is ``/app/fixtures/``.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -98,6 +99,39 @@ def _which(binary: str) -> bool:
     """Is ``binary`` available on PATH? (pure stdlib, no shutil.which call
     overhead per fixture)."""
     return shutil.which(binary) is not None
+
+
+def resolve_gcc_binary() -> str | None:
+    """Path to ``gcc`` for stripped-binary fixtures. Honors ``GCC_BINARY``."""
+    env = os.environ.get("GCC_BINARY", "gcc")
+    p = Path(env)
+    if p.is_file():
+        return str(p.resolve())
+    return shutil.which(env)
+
+
+def resolve_ffmpeg_binary() -> str | None:
+    """Path to ffmpeg for fixture encoding.
+
+    Uses ``FFMPEG_BINARY`` when set (absolute path recommended inside Apptainer),
+    otherwise ``shutil.which("ffmpeg")``.
+    """
+    env = os.environ.get("FFMPEG_BINARY", "ffmpeg")
+    p = Path(env)
+    if p.is_file():
+        return str(p.resolve())
+    found = shutil.which(env)
+    return found
+
+
+def fixture_seed_for_task(idx: int, task_dir_name: str) -> int:
+    """Deterministic 32-bit seed for fixture materialisation.
+
+    Used by task generation and by ``repair_video_fixtures`` so re-runs match
+    without relying on ``hash()`` (randomised per Python process by default).
+    """
+    h = hashlib.sha256(f"{idx}:{task_dir_name}".encode()).digest()
+    return int.from_bytes(h[:4], "big")
 
 
 # ---------------------------------------------------------------------------
@@ -245,11 +279,13 @@ def _materialize_video(
     """
     out_paths: List[Path] = []
 
-    if not _which("ffmpeg"):
+    ffmpeg_bin = resolve_ffmpeg_binary()
+    if ffmpeg_bin is None:
         sentinel = dest / "video.unavailable.txt"
         sentinel.write_text(
             "ffmpeg not available on build host; video fixture skipped.\n"
-            "Re-generate this task on a host with ffmpeg installed.\n"
+            "Set FFMPEG_BINARY to a working ffmpeg (e.g. inside base_intricate.sif) "
+            "or run: rl_data/scripts/repair/run_repair_video_fixtures_in_sif.sh\n"
         )
         out_paths.append(sentinel)
         return out_paths
@@ -268,7 +304,7 @@ def _materialize_video(
         mp4_path = dest / "video.mp4"
         proc = subprocess.run(
             [
-                "ffmpeg", "-loglevel", "error", "-y",
+                ffmpeg_bin, "-loglevel", "error", "-y",
                 "-framerate", str(fps),
                 "-i", str(frames_dir / "frame_%04d.ppm"),
                 "-pix_fmt", "yuv420p",
@@ -359,7 +395,7 @@ int main(void) {
     while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
     long acc = 0;
     for (size_t i = 0; i < n; ++i) {
-        acc = (acc * %MULT% + (long)(unsigned char)buf[i]) %% %MOD%;
+        acc = (acc * %MULT% + (long)(unsigned char)buf[i]) % %MOD%;
     }
     printf("%ld\n", acc);
     return 0;
@@ -378,10 +414,12 @@ def _materialize_stripped_binary(
     Falls back to dropping a sentinel if no host compiler is available.
     """
     out_paths: List[Path] = []
-    if not _which("gcc"):
+    gcc_bin = resolve_gcc_binary()
+    if gcc_bin is None:
         sentinel = dest / "binary.unavailable.txt"
         sentinel.write_text(
             "gcc not available on build host; stripped_binary fixture skipped.\n"
+            "Set GCC_BINARY or run: rl_data/scripts/repair/run_repair_stripped_binary_in_sif.sh\n"
         )
         out_paths.append(sentinel)
         return out_paths
@@ -397,12 +435,12 @@ def _materialize_stripped_binary(
     # source on disk across both attempts; only unlink after the final result
     # is known.
     proc = subprocess.run(
-        ["gcc", "-O2", "-s", "-static", "-o", str(out_path), str(src_path)],
+        [gcc_bin, "-O2", "-s", "-static", "-o", str(out_path), str(src_path)],
         capture_output=True, text=True, timeout=60,
     )
     if proc.returncode != 0:
         proc = subprocess.run(
-            ["gcc", "-O2", "-s", "-o", str(out_path), str(src_path)],
+            [gcc_bin, "-O2", "-s", "-o", str(out_path), str(src_path)],
             capture_output=True, text=True, timeout=60,
         )
     src_path.unlink(missing_ok=True)

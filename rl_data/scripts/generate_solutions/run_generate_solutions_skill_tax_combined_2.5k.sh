@@ -163,6 +163,15 @@ NUM_POOL_WORKERS="${NUM_POOL_WORKERS:-16}"
 # as visible_gpus / TP by _vllm_local.sh, so we only need to set TP here.
 export VLLM_TP="${VLLM_TP:-1}"
 
+# Context window. Helper default is 40960 — too tight for 64-action vanillux
+# runs on v2 tasks: histories accumulate apt/pip output, image-OCR results,
+# multi_protocol responses, etc. and routinely blow past 30K input tokens by
+# the late turns, hitting model-context ceiling and triggering 400-Bad-Request
+# from vLLM. Qwen3.6-27B's native context is 262144; 131072 (128K) leaves
+# comfortable headroom for the longest agent trajectories. Mirrors the value
+# the smoke script already validated.
+export VLLM_MAX_LEN="${VLLM_MAX_LEN:-131072}"
+
 # Prefix caching: agent loops have prompts that grow turn-by-turn, where
 # turn N+1's prompt is `turn N's prompt + new observation`. With caching,
 # only the new tokens are prefilled (vs re-prefilling the full growing

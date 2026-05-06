@@ -40,6 +40,13 @@ MODEL="${MODEL:-hosted_vllm/${VLLM_MODEL}}"
 NUM_SOLUTIONS="${NUM_SOLUTIONS:-8}"
 MAX_ACTIONS=16
 MAX_TOKENS="${MAX_TOKENS:-65536}"
+
+# Context window. Helper default is 40960 — too tight for v2-axis tasks
+# whose histories accumulate apt/pip output, image-OCR results, multi_protocol
+# responses, etc. and routinely blow past 30K input tokens. 131072 (128K)
+# leaves comfortable headroom; Qwen3.6-27B's native context is 262144 so this
+# is well within range. Override via env if you want to dial down for memory.
+export VLLM_MAX_LEN="${VLLM_MAX_LEN:-131072}"
 NUM_TASKS=999999
 START_AT=0
 SOLUTION_TEMPERATURE=0.7

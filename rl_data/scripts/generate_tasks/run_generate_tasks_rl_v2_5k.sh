@@ -34,9 +34,19 @@
 # ║    3. OUT_DIR / job-name — separate output dir so the legacy 10k corpus    ║
 # ║       stays untouched. Combine via plain ``cp -r`` at training time.       ║
 # ║                                                                            ║
-# ║  Prerequisite (one-time): build base_intricate.sif on a build node:        ║
-# ║      apptainer build rl_data/containers/base_intricate.sif \               ║
-# ║                      rl_data/containers/base_intricate.def                 ║
+# ║  Prerequisites:                                                            ║
+# ║    * base_intricate.sif — build on a build node when updating the def:     ║
+# ║        apptainer build rl_data/containers/base_intricate.sif \             ║
+# ║                        rl_data/containers/base_intricate.def               ║
+# ║    * ffmpeg on PATH for the **host** running this job (not inside the      ║
+# ║      SIF). Video fixtures are encoded at task-gen time; without ffmpeg you   ║
+# ║      get fixtures/video.unavailable.txt. Repair with (ffmpeg via SIF):     ║
+# ║        bash rl_data/scripts/repair/run_repair_video_fixtures_in_sif.sh \   ║
+# ║            --corpus-dir <OUT_DIR>                                          ║
+# ║    * gcc on PATH for stripped_binary fixtures (rolling_sum template        ║
+# ║      needs valid C). Repair:                                               ║
+# ║        bash rl_data/scripts/repair/run_repair_stripped_binary_in_sif.sh \  ║
+# ║            --corpus-dir <OUT_DIR>                                          ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
 
 set -euo pipefail

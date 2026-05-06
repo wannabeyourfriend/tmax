@@ -4,22 +4,25 @@ cd "$(dirname "$0")/../../.."
 
 # ── Upload RL task dataset to Hugging Face ───────────────────────────
 #
-# Uploads the raw task folder structure (task_*/*, analysis/*) AND a
-# consolidated .parquet file so HuggingFace Dataset Viewer can preview
-# the data directly on the web.
+# Uploads task_* trees (plus analysis/, data/*.parquet for the viewer).
+# ``container.sif`` is excluded (local Apptainer only; RL training uses Docker
+# from container.def — see rl_data.upload_to_hf.ALWAYS_IGNORE).
+#
+# Default below targets the **combined RL corpus** (~14.6k tasks: legacy 10k
+# union v2 5k). Override for the standalone 10k or 5k trees as needed.
 #
 # Usage:
 #   bash rl_data/scripts/upload/upload_data_to_hf.sh
-#   bash rl_data/scripts/upload/upload_data_to_hf.sh --input-dir rl_data/output/tasks_v2
-#   bash rl_data/scripts/upload/upload_data_to_hf.sh --repo osieosie/tmax-rl-v2 --private
+#   bash rl_data/scripts/upload/upload_data_to_hf.sh --input-dir rl_data/output/tasks_skill_tax_20260401_10k
+#   bash rl_data/scripts/upload/upload_data_to_hf.sh --repo osieosie/my-dataset --private
 #   bash rl_data/scripts/upload/upload_data_to_hf.sh --no-parquet
 #
 # Requirements:
 #   - huggingface-cli login  (or HF_TOKEN env var)
 #   - Python with huggingface_hub, pandas, pyarrow
 
-REPO_ID="osieosie/tmax-tasks-skill-taxonomy-20260401-10k"
-INPUT_DIR="/gpfs/scrubbed/osey/tmax/rl_data/output/tasks_skill_tax_20260401_10k"
+REPO_ID="osieosie/tmax-tasks-skill-taxonomy-20260506-legacy10k-new5k-rl"
+INPUT_DIR="/gpfs/scrubbed/osey/tmax/rl_data/output/tasks_skill_tax_combined_20260506_legacy10k_new5k"
 PRIVATE=""
 # These are "opt-out" flags — empty by default (feature ON), set to the
 # corresponding CLI flag string when the user passes the option.

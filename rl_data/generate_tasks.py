@@ -29,9 +29,11 @@ from rl_data.generator.task_template_gen import generate_templates_batch
 from rl_data.generator.initial_state_test_gen import generate_test_templates_batch as generate_initial_tests_batch
 from rl_data.generator.apptainer_def_gen import iterate_def_template_batch, save_setup_artifacts
 from rl_data.generator.completion_test_gen import generate_test_templates_batch as generate_final_tests_batch
+from rl_data.generator.container_def_patch import inject_files_section
 from rl_data.generator.fixture_gen import (
     materialize as fixture_materialize,
     emit_files_section,
+    fixture_seed_for_task,
     NOOP_FIXTURE_KINDS,
 )
 
@@ -84,22 +86,6 @@ def _build_sif(def_path: Path, sif_path: Path) -> bool:
 def _format_task_dir(base: Path, idx: int, width: int = 6) -> Path:
     suffix = uuid.uuid4().hex[:8]
     return base / f"task_{idx:0{width}d}_{suffix}"
-
-
-def _inject_files_section(def_text: str, files_section: str) -> str:
-    """Insert a ``%files`` block immediately before the first ``%post`` line.
-
-    Apptainer accepts ``%files`` anywhere before ``%post``; standard practice
-    is to put it right after the ``Bootstrap/From`` header. If the def has no
-    ``%post`` (rare, malformed) we just append the section at the end.
-    """
-    files_section = files_section.rstrip() + "\n"
-    lines = def_text.splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        # Match the section header even when the LLM emits leading whitespace.
-        if line.lstrip().lower().startswith("%post"):
-            return "".join(lines[:i]) + files_section + "\n" + "".join(lines[i:])
-    return def_text.rstrip() + "\n\n" + files_section
 
 
 def _save_task_bundle(
@@ -322,10 +308,8 @@ def _save_one_task(
     # No-op for legacy tasks (text_only / unknown kinds).
     fixture_kind = m.get("fixture_kind", "text_only")
     if fixture_kind not in NOOP_FIXTURE_KINDS:
-        # Seed the fixture generator with the task index so a re-run of the
-        # same pipeline produces byte-identical artefacts; combine with the
-        # task_dir name's uuid suffix for a stable per-task identity.
-        fixture_seed = abs(hash((idx, task_dir.name))) % (2**32)
+        # Stable seed (not ``hash()`` — salted per-process in Python 3).
+        fixture_seed = fixture_seed_for_task(idx, task_dir.name)
         fixture_pairs = fixture_materialize(
             fixture_kind,
             task_description=desc,
@@ -338,7 +322,7 @@ def _save_one_task(
             # Prepend the %files section before the existing %post — Apptainer
             # accepts %files anywhere before %post, but standard practice is
             # to put it immediately after the Bootstrap/From header.
-            def_text = _inject_files_section(def_text, files_section)
+            def_text = inject_files_section(def_text, files_section)
 
     _save_task_bundle(
         task_dir, task_obj, item["init_test"], def_text,

@@ -1,33 +1,42 @@
-"""Combine two task corpora into a single balanced "combined" folder.
+"""Combine two task corpora into a single "combined" folder of symlinks.
 
-Use case: we have a 2k v2 corpus that's intricate-heavy (~67% intricate after
-the M=2 bucket-upweight) and a 1k legacy corpus that's evenly split across the
-3 legacy complexity buckets. We want a single corpus that's roughly balanced
-across the 4 task_complexity buckets (short / moderate / complex / intricate).
+Modes
+-----
+``balanced`` (default)
+    SFT-oriented mix: keep all non-intricate tasks from both corpora, then
+    randomly down-sample v2 intricate tasks to hit ``--total`` (see module
+    body for the full rule).
 
-Strategy
+``union``
+    RL-oriented mix: symlink **every** task from both trees (legacy + v2).
+    Fails fast if a ``task_*`` basename appears in both (would clobber a
+    symlink). ``--total`` is ignored. Tasks are ordered lexicographically by
+    directory name for stable manifests.
+
+Both modes materialise symlinks under ``--out-dir`` so ``rl_data.analyze`` and
+upload scripts can use the folder as a drop-in root.
+
+The script refuses to overwrite an existing non-empty ``--out-dir`` unless
+``--force`` is passed.
+
+Examples
 --------
-1. Keep **all** non-intricate tasks from both corpora.
-2. Down-sample intricate tasks from the v2 corpus (random, seeded) to bring
-   the total to ``--total`` tasks (default 2500).
-3. Materialise the result as a folder of symlinks pointing back at the
-   original task directories, preserving the on-disk task names. The
-   analyzer (``rl_data.analyze``) iterates ``task_*`` subdirs and follows
-   symlinks transparently, so the combined folder is a drop-in input.
-
-The script is idempotent over its ``--out-dir``: it refuses to overwrite an
-existing non-empty directory unless ``--force`` is passed.
-
-Example
--------
 .. code-block:: bash
 
-    uv run python -m rl_data.scripts.combine.combine_corpora \
-        --v2-dir rl_data/output/tasks_skill_tax_v2_20260505_2k \
-        --legacy-dir rl_data/output/tasks_skill_tax_20260505_1k_legacy \
-        --out-dir rl_data/output/tasks_skill_tax_combined_20260506_2.5k \
-        --total 2500 \
+    # Balanced ~2.5k SFT view (legacy 1k + v2 2k, intricate capped)
+    uv run python -m rl_data.scripts.combine.combine_corpora \\
+        --v2-dir rl_data/output/tasks_skill_tax_v2_20260505_2k \\
+        --legacy-dir rl_data/output/tasks_skill_tax_20260505_1k_legacy \\
+        --out-dir rl_data/output/tasks_skill_tax_combined_20260506_2.5k \\
+        --total 2500 \\
         --seed 0
+
+    # Full RL union: legacy ~10k + v2 5k (actual total ≈ task counts on disk)
+    uv run python -m rl_data.scripts.combine.combine_corpora \\
+        --mode union \\
+        --legacy-dir rl_data/output/tasks_skill_tax_20260401_10k \\
+        --v2-dir rl_data/output/tasks_skill_tax_v2_20260506_5k \\
+        --out-dir rl_data/output/tasks_skill_tax_combined_20260506_legacy10k_new5k
 """
 from __future__ import annotations
 
@@ -158,11 +167,38 @@ def select_combined(
     return keep
 
 
+def select_union(
+    v2_rows: list[tuple[Path, dict]],
+    legacy_rows: list[tuple[Path, dict]],
+) -> list[tuple[Path, dict, str]]:
+    """Symlink every task from legacy then v2; stable sort by directory name."""
+    legacy_names = [d.name for d, _ in legacy_rows]
+    v2_names = [d.name for d, _ in v2_rows]
+    overlap = set(legacy_names) & set(v2_names)
+    if overlap:
+        sample = sorted(overlap)[:10]
+        more = f" (+{len(overlap) - len(sample)} more)" if len(overlap) > 10 else ""
+        print(
+            f"[error] {len(overlap)} task_* basename(s) appear in both corpora "
+            f"(example: {sample}{more}). Resolve collisions before union.",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+    chosen: list[tuple[Path, dict, str]] = [
+        (d, m, "legacy") for d, m in legacy_rows
+    ]
+    chosen.extend((d, m, "v2") for d, m in v2_rows)
+    chosen.sort(key=lambda t: t[0].name)
+    return chosen
+
+
 def materialise(
     chosen: list[tuple[Path, dict, str]],
     out_dir: Path,
     *,
     force: bool,
+    combine_mode: str | None = None,
 ) -> None:
     """Symlink every chosen task dir into ``out_dir``.
 
@@ -202,6 +238,8 @@ def materialise(
         },
         "tasks": name_to_source,
     }
+    if combine_mode is not None:
+        manifest["combine_mode"] = combine_mode
     (out_dir / "_combine_manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True)
     )
@@ -214,8 +252,15 @@ def main() -> None:
     p.add_argument("--legacy-dir", type=Path, required=True, help="legacy corpus root.")
     p.add_argument("--out-dir", type=Path, required=True, help="output combined corpus dir.")
     p.add_argument(
+        "--mode",
+        choices=("balanced", "union"),
+        default="balanced",
+        help='combination strategy: "balanced" (SFT, uses --total) or '
+        '"union" (RL: all tasks from both dirs; ignores --total).',
+    )
+    p.add_argument(
         "--total", type=int, default=2500,
-        help="target total number of tasks in the combined corpus (default 2500).",
+        help="target total tasks when --mode balanced (ignored for union).",
     )
     p.add_argument("--seed", type=int, default=0, help="RNG seed for intricate sampling.")
     p.add_argument(
@@ -238,8 +283,11 @@ def main() -> None:
     _print_dist("v2", v2_rows)
     _print_dist("legacy", legacy_rows)
 
-    rng = random.Random(args.seed)
-    chosen = select_combined(v2_rows, legacy_rows, args.total, rng)
+    if args.mode == "union":
+        chosen = select_union(v2_rows, legacy_rows)
+    else:
+        rng = random.Random(args.seed)
+        chosen = select_combined(v2_rows, legacy_rows, args.total, rng)
 
     print()
     print("[combine] selected combined distribution")
@@ -253,7 +301,7 @@ def main() -> None:
 
     print()
     print(f"[combine] materialising into {args.out_dir}")
-    materialise(chosen, args.out_dir, force=args.force)
+    materialise(chosen, args.out_dir, force=args.force, combine_mode=args.mode)
     print(f"  done. {len(chosen)} task symlinks placed.")
 
 
