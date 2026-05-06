@@ -69,6 +69,15 @@ From: ubuntu:22.04
         --index-url https://download.pytorch.org/whl/cpu \
         torch torchvision
 
+    # NOTE on the agent loop: rl_data.generator.vanillux_solver runs the
+    # mini-swe-agent-style harness ENTIRELY ON THE HOST (in our solver
+    # process). Only bash actions cross into this container via
+    # InteractiveContainerEnvironment.exec(). That means this SIF only
+    # needs bash + the build/ML/RE deps installed above — no swe-agent
+    # CLI, no Python 3.11 venv, no extra ~200 MB layer. As a bonus, the
+    # vanillux harness now also works on every legacy per-domain base
+    # SIF without modification.
+
     useradd -m -s /bin/bash user || true
     chmod 755 /home/user
 

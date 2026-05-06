@@ -81,11 +81,14 @@ class SolutionConfig:
     #: Seed for the random sample; keep fixed across runs for reproducibility.
     sample_seed: int = 0
     #: Solution-sampling harness. ``"bash"`` (default) is the legacy
-    #: bash-tool-calling harness in :func:`sample_solutions.run_n_solutions`.
-    #: ``"vanillux"`` switches to the swe-agent-flavoured 3-tool harness
-    #: (bash + str_replace_editor + submit) in
-    #: :func:`vanillux_solver.run_n_solutions_vanillux`. The two are drop-in
-    #: compatible at the call-site level.
+    #: bash-tool-calling harness in :func:`sample_solutions.run_n_solutions`
+    #: (terse system prompt, 16-action default).
+    #: ``"vanillux"`` switches to the mini-swe-agent-style bash-tool harness
+    #: in :func:`vanillux_solver.run_n_solutions_vanillux` (vendored prompts
+    #: from upstream mini-swe-agent's ``config/default.yaml``, 64-action
+    #: default, head/tail observation truncation). Both share the same single
+    #: ``bash`` tool surface and the same ``COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT``
+    #: submit marker, so the A/B is a clean prompt-richness + budget test.
     harness: str = "bash"
 
 
@@ -265,9 +268,10 @@ def process_task(task_dir: str, cfg: SolutionConfig):
             cmd_log_resolved = cmd_log_resolved.resolve()
             print(f"[{task_dir.name}] Command debug logs -> {cmd_log_resolved}")
 
-        # Pick the solution-sampling harness. ``bash`` (default) reproduces the
-        # legacy 1k/10k pipeline byte-for-byte; ``vanillux`` switches to the
-        # swe-agent-flavoured 3-tool harness used for v2 RL solutions.
+        # Pick the solution-sampling harness. ``bash`` (default) reproduces
+        # the legacy 1k/10k pipeline byte-for-byte; ``vanillux`` switches to
+        # the mini-swe-agent-style bash-tool harness used for v2 RL solutions
+        # (see vanillux_solver.py for the architectural rationale).
         if cfg.harness == "vanillux":
             solver_fn = run_n_solutions_vanillux
         elif cfg.harness == "bash":
@@ -412,10 +416,10 @@ def parse_args(argv: Optional[List[str]] = None) -> SolutionConfig:
         choices=["bash", "vanillux"],
         help=(
             "Solution-sampling harness. 'bash' (default) reproduces the legacy "
-            "bash-tool-calling pipeline byte-for-byte. 'vanillux' switches to "
-            "the swe-agent-flavoured 3-tool harness (bash + str_replace_editor "
-            "+ submit) used for v2 RL solutions; matches the deployment "
-            "harness on Daytona."
+            "bash-tool-calling pipeline byte-for-byte (terse prompt, 16-action "
+            "budget). 'vanillux' switches to the mini-swe-agent-style harness "
+            "(vendored upstream prompts, 64-action budget, head/tail observation "
+            "truncation; same single bash tool). Used for v2 RL solutions."
         ),
     )
 

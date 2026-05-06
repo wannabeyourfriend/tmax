@@ -14,9 +14,20 @@
 # ╔══════════════════════════════════════════════════════════════════════════╗
 # ║  Harness A/B smoke — bash vs vanillux on a 25-task sample                  ║
 # ║                                                                            ║
-# ║  Purpose: shake out the new --harness vanillux code path (str_replace_     ║
-# ║  editor / submit / ATIF dump) end-to-end on a small, well-known set of    ║
-# ║  tasks BEFORE we commit to a multi-day v2 RL solution-sampling run.       ║
+# ║  Purpose: shake out the new --harness vanillux code path (mini-swe-agent-  ║
+# ║  style bash-tool harness with vendored prompts + 64-action budget) end-to- ║
+# ║  end on a small, well-known set of tasks BEFORE committing to a multi-day  ║
+# ║  v2 RL solution-sampling run.                                              ║
+# ║                                                                            ║
+# ║  Harness shape (post-pivot to vendored mini-swe-agent prompts):            ║
+# ║    bash      — terse system prompt (sft/preprocessing/config/system_prompt ║
+# ║                .txt), single bash tool, 16-action default.                 ║
+# ║    vanillux  — mini-swe-agent's "Recommended Workflow" prompt              ║
+# ║                (rl_data/generator/vanillux_prompts.yaml; vendored from     ║
+# ║                upstream), single bash tool (same), 64-action default,      ║
+# ║                head/tail observation truncation. No SIF dependencies; the  ║
+# ║                agent loop runs in our solver process and only bash actions ║
+# ║                cross into the container.                                   ║
 # ║                                                                            ║
 # ║  Approach: re-uses an EXISTING task corpus (no fresh task gen), random-    ║
 # ║  samples 25 tasks (--sample-size 25 --sample-seed 0), runs k=4 solutions  ║
@@ -50,7 +61,8 @@
 # ║  no-op.                                                                    ║
 # ║                                                                            ║
 # ║  Same teacher model topology as the legacy SFT script                     ║
-# ║  (run_generate_solutions_skill_tax_1k.sh) — Qwen3.6-27B local vLLM,       ║
+# ║  (run_generate_solutions_skill_tax_combined_2.5k.sh) — Qwen3.6-27B local  ║
+# ║  vLLM,                                                                    ║
 # ║  TP=2 DP=4 on 8×H200. This way the smoke matches the deployment harness  ║
 # ║  on apples-to-apples teacher-side, isolating the harness change.          ║
 # ╚══════════════════════════════════════════════════════════════════════════╝
@@ -70,9 +82,9 @@ export LAUNCH_VLLM="${LAUNCH_VLLM:-1}"
 export VLLM_MODEL="${VLLM_MODEL:-Qwen/Qwen3.6-27B}"
 MODEL="${MODEL:-hosted_vllm/${VLLM_MODEL}}"
 
-# 4-attempt pass@k for the smoke (was 8). Halves the LLM cost per task while
-# still giving a meaningful pass@1 / pass@4 signal for the harness A/B.
-NUM_SOLUTIONS="${NUM_SOLUTIONS:-4}"
+# 8-attempt pass@k for the smoke (matches the full corpus runs). pass@1 +
+# pass@8 are the two numbers we read off the final tally section.
+NUM_SOLUTIONS="${NUM_SOLUTIONS:-8}"
 
 # Apples-to-apples step budget across both harnesses for the smoke A/B.
 # v2 tasks (intricate-complexity) routinely need >16 turns, and we want a
@@ -95,7 +107,9 @@ MAX_TOKENS="${MAX_TOKENS:-8192}"
 NUM_TASKS=999999
 START_AT=0
 SOLUTION_TEMPERATURE=0.7
-COMMAND_TIMEOUT=60
+COMMAND_TIMEOUT=180            # was 60 — v2 tasks need more headroom for package
+                               # installs, vendored_package builds, multi_service
+                               # boot, image/audio toolchain init.
 SHELL_INIT_TIMEOUT=240
 SHELL_INIT_ATTEMPTS=3
 # BUILD_WORKERS only matters when missing base SIFs need to be built. With
@@ -116,14 +130,13 @@ DISABLE_TERMINAL_LOG=0
 #   * Total concurrent containers = WORKERS * NUM_SOLUTIONS.
 #
 # h200 nodes give 8 CPUs + ~240 GB RAM per GPU, so an 8×H200 allocation has
-# 64 CPUs + ~1.28 TB RAM. Rule of thumb (from run_generate_solutions_10k.sh):
-#   containers <= CPUs (1:1) baseline, up to 1.5x for I/O-heavy workloads.
-# With NUM_SOLUTIONS=4 the smoke fits 24 workers * 4 = 96 containers — right
-# at the 1.5x ceiling, which is fine because the agent loop is heavily
-# I/O-bound (LLM round-trip + bash exec, never CPU-pinned).
-# At SAMPLE_SIZE=25 this means almost the entire batch runs in one wave.
+# 64 CPUs + ~1.28 TB RAM. With NUM_SOLUTIONS=8 the smoke fits
+#   24 workers × 8 = 192 containers (~3× CPU oversubscription).
+# That's well above the 1.5× I/O-bound rule but vLLM is the actual throughput
+# ceiling for local-Qwen smokes anyway, so client-side concurrency mostly just
+# fills vLLM's queue. Drop WORKERS=12 on a 4-GPU/32-CPU allocation.
 WORKERS="${WORKERS:-24}"
-NUM_POOL_WORKERS="${NUM_POOL_WORKERS:-8}"
+NUM_POOL_WORKERS="${NUM_POOL_WORKERS:-16}"
 
 export VLLM_TP="${VLLM_TP:-2}"
 # --------------------------------
