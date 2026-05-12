@@ -7,6 +7,7 @@
 #   MODEL_PATH               HF model path or weka path (required)
 #   MODEL_REVISION           HF revision/branch (default: main)
 #   SERVED_MODEL_NAME        --served-model-name for vLLM (required)
+#   VLLM_VERSION             vLLM package version for uvx (default: 0.19.1)
 #   VLLM_PORT                port for vLLM (default: 8008)
 #   TP_SIZE                  --tensor-parallel-size (required)
 #   DP_SIZE                  --data-parallel-size (default: 1)
@@ -45,7 +46,7 @@ if ! command -v podman >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get install -y -qq podman crun uidmap fuse-overlayfs slirp4netns \
-        netavark aardvark-dns curl git ca-certificates
+        curl git ca-certificates
 fi
 
 # --- 2. Write containers.conf -----------------------------------------------
@@ -86,7 +87,7 @@ fi
 uv sync
 
 log "patching harbor for podman compat"
-python3 - <<'PY'
+uv run python - <<'PY'
 import pathlib, harbor
 hdir = pathlib.Path(harbor.__file__).parent
 
@@ -142,10 +143,12 @@ source scripts/setup_podman_harbor.sh
 export DOCKER_HOST="${DOCKER_HOST:-unix:///tmp/podman.sock}"
 
 # --- 5. Start vLLM in the background ----------------------------------------
+: "${VLLM_VERSION:=0.19.1}"
 : "${VLLM_PORT:=8008}"
 : "${DP_SIZE:=1}"
 VLLM_LOG=/tmp/vllm.log
-VLLM_CMD=( uvx vllm serve "$MODEL_PATH"
+VLLM_LOG_TAIL_LINES="${VLLM_LOG_TAIL_LINES:-300}"
+VLLM_CMD=( uvx "vllm==${VLLM_VERSION}" serve "$MODEL_PATH"
            --revision "$MODEL_REVISION"
            --tokenizer-revision "$MODEL_REVISION"
            --served-model-name "$SERVED_MODEL_NAME"
@@ -178,7 +181,7 @@ for _ in $(seq 1 360); do
     fi
     if ! kill -0 "$VLLM_PID" 2>/dev/null; then
         log "vllm process died — tail of $VLLM_LOG:"
-        tail -80 "$VLLM_LOG" || true
+        tail -"$VLLM_LOG_TAIL_LINES" "$VLLM_LOG" || true
         exit 1
     fi
     sleep 5
@@ -186,7 +189,7 @@ done
 
 if ! curl -sf "http://localhost:$VLLM_PORT/v1/models" >/dev/null 2>&1; then
     log "vllm did not become ready in 30 min — tail of $VLLM_LOG:"
-    tail -80 "$VLLM_LOG" || true
+    tail -"$VLLM_LOG_TAIL_LINES" "$VLLM_LOG" || true
     exit 1
 fi
 
