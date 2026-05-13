@@ -65,23 +65,51 @@ def _shorten_cmd_complexity(raw: str) -> str:
     return _CMD_COMPLEXITY_MAP.get(prefix, prefix)
 
 
+# Default candidates reported alongside pass@1 in the banner / aggregate
+# tables / quality plots. Each candidate k is included only if **at least
+# one** solved task has data at that k — so a NUM_SOLUTIONS=4 smoke run will
+# show only pass@4, while a uniform NUM_SOLUTIONS=8 corpus will show both
+# pass@4 (intermediate) and pass@8 (ceiling). Tasks that lack a value at a
+# given k contribute "-" to that cell only; pass@1 always uses every task.
+_DEFAULT_PASS_K_LADDER: tuple[int, ...] = (4, 8)
+
+
+def _resolve_pass_k_ladder(
+    records: List[Dict[str, Any]],
+    override: Optional[int] = None,
+) -> List[int]:
+    """Return the list of K's to report alongside pass@1.
+
+    *override*: when set (via ``--pass-at-k``), the ladder is forced to
+    ``[override]`` — useful for forcing two corpora to be compared at a
+    fixed k.
+
+    Otherwise: every k in :data:`_DEFAULT_PASS_K_LADDER` for which at least
+    one solved task has data is kept. For a ragged corpus (e.g. some tasks
+    at NUM_SOLUTIONS=4, others at 8) this yields ``[4, 8]`` — the pass@4
+    column is dense and the pass@8 column is partial. Per-cell n-counts
+    are surfaced where they differ from the bucket size.
+    """
+    if override is not None:
+        return [int(override)]
+    present: set[int] = set()
+    for r in records:
+        if not r.get("has_solutions"):
+            continue
+        present.update(r.get("pass_at_k_full", {}).keys())
+    return [k for k in _DEFAULT_PASS_K_LADDER if k in present]
+
+
 def _resolve_pass_k(
     records: List[Dict[str, Any]],
     override: Optional[int] = None,
 ) -> int:
-    """Return the canonical "ceiling" k to report alongside pass@1.
+    """Backwards-compat single-K resolver — used in spots where one number
+    is genuinely needed (e.g. the vertical guide line on the pass@k curve).
 
-    The data-gen pipeline runs ``NUM_SOLUTIONS`` attempts per task and the
-    summary stores ``pass_at_k`` as a dense dict keyed 1..NUM_SOLUTIONS. That
-    means a corpus where some tasks were sampled at NUM_SOLUTIONS=4 (e.g. the
-    vanillux smoke run) and others at NUM_SOLUTIONS=8 will have a *ragged*
-    set of available k's. To stay apples-to-apples in cross-task aggregates,
-    we pick the **largest k that every solved task in the corpus has data
-    for** — i.e. the min of per-task max-k over solved records.
-
-    *override*: when set (via ``--pass-at-k``), use it directly. Tasks that
-    don't have that k get treated as missing in the aggregate (same handling
-    as the previous hardcoded pass@8 path) but we warn so it's noticed.
+    Returns the largest k that **every solved task** has data for (= min of
+    per-task max-k). When all solved tasks were sampled at NUM_SOLUTIONS=K,
+    this is just K.
     """
     if override is not None:
         return int(override)
@@ -546,16 +574,19 @@ def print_summary(
     model_slug: Optional[str] = None,
     max_rows: int = 50,
     harness: str = "bash",
-    pass_k_target: int = 8,
+    pass_k_ladder: Optional[List[int]] = None,
 ) -> None:
     """Print model stats banner, optionally per-task rows, and aggregate table.
 
-    *pass_k_target* is the "ceiling" k whose mean is shown alongside pass@1
-    in the banner / per-axis tables. Resolved by ``_resolve_pass_k`` (corpus
-    common max k, or user override). Tasks without a value at this k are
-    excluded from that specific cell — callers should pick a k that all
-    solved tasks have to keep aggregates apples-to-apples.
+    *pass_k_ladder* is the list of K's to report alongside pass@1. Resolved
+    by ``_resolve_pass_k_ladder`` — defaults to every K in
+    :data:`_DEFAULT_PASS_K_LADDER` for which at least one solved task has
+    data. Tasks without a value at a given K are excluded from that
+    specific cell only (per-cell n-counts are shown when they differ from
+    the bucket size).
     """
+    if pass_k_ladder is None:
+        pass_k_ladder = []
     solved = [r for r in records if r["has_solutions"]]
 
     # ── Model-level stats banner ──────────────────────────────────────
@@ -583,38 +614,40 @@ def print_summary(
     # (e.g. some tasks sampled at NUM_SOLUTIONS=4, others at 8).
     if solved:
         ks_max = Counter(r["pass_k_max_avail"] for r in solved)
+        ladder_str = ", ".join(f"k={k}" for k in pass_k_ladder) or "(none)"
         if len(ks_max) > 1:
             mix = ", ".join(
                 f"k≤{k}: {n}" for k, n in sorted(ks_max.items())
             )
             print(
-                f"  Pass@k ceiling: k={pass_k_target} "
+                f"  Pass@k ladder: {ladder_str}  "
                 f"(per-task max-k mix: {mix})"
             )
-        elif pass_k_target:
+        else:
             (only_k,) = list(ks_max)
-            print(f"  Pass@k ceiling: k={pass_k_target} "
+            print(f"  Pass@k ladder: {ladder_str}  "
                   f"(every solved task has k=1..{only_k})")
 
-    pk_label = f"p@{pass_k_target}" if pass_k_target else "p@-"
     if solved:
         avg_p1 = (
             sum(r["pass@1"] for r in solved if r["pass@1"] is not None)
             / len(solved)
         )
-        pk_vals = [_pass_at_k(r, pass_k_target) for r in solved]
-        pk_vals = [v for v in pk_vals if v is not None]
-        avg_pk = sum(pk_vals) / len(pk_vals) if pk_vals else 0.0
         avg_turns = sum(r["avg_turns"] for r in solved) / len(solved)
-        pk_n_label = (
-            f"  (n={len(pk_vals)}/{len(solved)})"
-            if len(pk_vals) != len(solved) else ""
-        )
-        print(
-            f"  Mean p@1: {avg_p1:.2f}  "
-            f"│  Mean {pk_label}: {avg_pk:.2f}{pk_n_label}  "
-            f"│  Avg turns: {avg_turns:.1f}"
-        )
+        bits = [f"Mean p@1: {avg_p1:.2f}"]
+        for k in pass_k_ladder:
+            pk_vals = [v for v in (_pass_at_k(r, k) for r in solved) if v is not None]
+            if not pk_vals:
+                bits.append(f"Mean p@{k}: -")
+                continue
+            avg_pk = sum(pk_vals) / len(pk_vals)
+            n_lbl = (
+                f" (n={len(pk_vals)}/{len(solved)})"
+                if len(pk_vals) != len(solved) else ""
+            )
+            bits.append(f"Mean p@{k}: {avg_pk:.2f}{n_lbl}")
+        bits.append(f"Avg turns: {avg_turns:.1f}")
+        print("  " + "  │  ".join(bits))
     print(
         f"  Total words: {_fmt_count(total_words)}  "
         f"│  Avg words/run: {_fmt_count(avg_words)}  "
@@ -673,19 +706,22 @@ def print_summary(
     # ── Per-task rows (skip if too many) ──────────────────────────────
     show_rows = max_rows == 0 or len(records) <= max_rows
     if show_rows:
-        pk_col = f"p@{pass_k_target}" if pass_k_target else "p@-"
+        pk_cols = " ".join(f"{f'p@{k}':>6}" for k in pass_k_ladder)
         header = (
             f"{'Task':<30} {'Domain':<24} {'Skill Type':<20} "
             f"{'Task Cplx':<12} {'Cmd Cplx':<20} "
             f"{'Runs':>5} {'Pass':>5} "
-            f"{'p@1':>6} {pk_col:>6} {'Turns':>6}"
+            f"{'p@1':>6} {pk_cols} {'Turns':>6}".rstrip()
         )
         print(header)
         print("-" * len(header))
         for r in records:
             p1 = f"{r['pass@1']:.2f}" if r["pass@1"] is not None else "-"
-            pk_val = _pass_at_k(r, pass_k_target)
-            pk = f"{pk_val:.2f}" if pk_val is not None else "-"
+            pk_cells = []
+            for k in pass_k_ladder:
+                v = _pass_at_k(r, k)
+                pk_cells.append(f"{v:>6.2f}" if v is not None else f"{'-':>6}")
+            pk_str = " ".join(pk_cells)
             turns = (
                 f"{r['avg_turns']:>6.1f}" if r["has_solutions"] else f"{'-':>6}"
             )
@@ -693,7 +729,7 @@ def print_summary(
                 f"{r['name']:<30} {r['domain']:<24} {r['skill_type']:<20} "
                 f"{r['task_complexity']:<12} {r['command_complexity']:<20} "
                 f"{r['num_runs']:>5} {r['num_success']:>5} "
-                f"{p1:>6} {pk:>6} {turns}"
+                f"{p1:>6} {pk_str} {turns}".rstrip()
             )
         print()
     else:
@@ -706,13 +742,13 @@ def print_summary(
     if not solved:
         return
     _print_aggregate(solved, "domain", "Domain", model_slug=slug,
-                     pass_k_target=pass_k_target)
+                     pass_k_ladder=pass_k_ladder)
     _print_aggregate(solved, "task_complexity", "Task Complexity",
                      key_order=_TASK_COMPLEXITY_ORDER, model_slug=slug,
-                     pass_k_target=pass_k_target)
+                     pass_k_ladder=pass_k_ladder)
     _print_aggregate(solved, "command_complexity", "Cmd Complexity",
                      key_order=_CMD_COMPLEXITY_ORDER, model_slug=slug,
-                     pass_k_target=pass_k_target)
+                     pass_k_ladder=pass_k_ladder)
 
     # ── v2-axis breakdowns (only print when the axis isn't degenerate) ─
     # Suppresses pure noise on legacy-only corpora where every task has the
@@ -724,19 +760,19 @@ def print_summary(
     if _has_variation("verifier_kind"):
         _print_aggregate(solved, "verifier_kind", "Verifier Kind",
                          key_order=_VERIFIER_KIND_ORDER, model_slug=slug,
-                         pass_k_target=pass_k_target)
+                         pass_k_ladder=pass_k_ladder)
     if _has_variation("fixture_kind"):
         _print_aggregate(solved, "fixture_kind", "Fixture Kind",
                          key_order=_FIXTURE_KIND_ORDER, model_slug=slug,
-                         pass_k_target=pass_k_target)
+                         pass_k_ladder=pass_k_ladder)
     if _has_variation("corpus_kind"):
         _print_aggregate(solved, "corpus_kind", "Corpus Kind",
                          key_order=_CORPUS_KIND_ORDER, model_slug=slug,
-                         pass_k_target=pass_k_target)
+                         pass_k_ladder=pass_k_ladder)
     if _has_variation("base_image"):
         _print_aggregate(solved, "base_image", "Base Image",
                          key_order=_BASE_IMAGE_ORDER, model_slug=slug,
-                         pass_k_target=pass_k_target)
+                         pass_k_ladder=pass_k_ladder)
 
 
 def _print_aggregate(
@@ -745,53 +781,62 @@ def _print_aggregate(
     label: str,
     key_order: Optional[List[str]] = None,
     model_slug: Optional[str] = None,
-    pass_k_target: int = 8,
+    pass_k_ladder: Optional[List[int]] = None,
 ) -> None:
     """Print a small aggregate table grouped by *field*.
 
-    The ``p@K`` column header / lookup uses *pass_k_target* (resolved by
-    ``_resolve_pass_k`` to keep cross-task means apples-to-apples). Tasks
-    in a bucket that don't have a value at this k are excluded from that
-    bucket's pass@K average only — pass@1 still uses every task.
+    Each K in *pass_k_ladder* gets its own ``p@K`` column. Tasks in a
+    bucket that don't have a value at a given K are excluded from that
+    cell's average only — pass@1 (and bucket size ``n``) always uses every
+    task, so a ragged corpus is obvious from the difference.
     """
+    if pass_k_ladder is None:
+        pass_k_ladder = []
     buckets: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for r in solved:
         buckets[r[field]].append(r)
 
     keys = key_order if key_order else sorted(buckets.keys())
     has_cost = model_slug and model_slug in _PRICING
-    pk_col = f"p@{pass_k_target}" if pass_k_target else "p@-"
 
+    pk_hdr = " ".join(f"{f'p@{k}':>6}" for k in pass_k_ladder)
+    pk_dash_blocks = " ".join(f"{'-':>6}" for _ in pass_k_ladder)
     hdr = (
-        f"  {'':2}{label:<24} {'n':>4} {'p@1':>6} {pk_col:>6} "
+        f"  {'':2}{label:<24} {'n':>4} {'p@1':>6} {pk_hdr} "
         f"{'Turns':>6} {'Tokens':>10}"
-    )
+    ).rstrip()
     if has_cost:
         hdr += f" {'Cost':>10}"
     print(hdr)
     print(f"  {'':2}{'-'*(len(hdr)-4)}")
-    for k in keys:
-        recs = buckets.get(k, [])
+    for k_label in keys:
+        recs = buckets.get(k_label, [])
         if not recs:
-            line = (f"  {'':2}{k:<24} {'0':>4} {'-':>6} {'-':>6} "
-                    f"{'-':>6} {'-':>10}")
+            empty_pk = pk_dash_blocks if pk_dash_blocks else ""
+            line = (f"  {'':2}{k_label:<24} {'0':>4} {'-':>6} {empty_pk} "
+                    f"{'-':>6} {'-':>10}").rstrip()
             if has_cost:
                 line += f" {'-':>10}"
             print(line)
             continue
         n = len(recs)
         mp1 = sum(r["pass@1"] for r in recs if r["pass@1"] is not None) / n
-        pk_vals = [_pass_at_k(r, pass_k_target) for r in recs]
-        pk_vals = [v for v in pk_vals if v is not None]
-        mpk_str = f"{(sum(pk_vals) / len(pk_vals)):>6.2f}" if pk_vals else f"{'-':>6}"
+        pk_cells: List[str] = []
+        for k in pass_k_ladder:
+            pk_vals = [v for v in (_pass_at_k(r, k) for r in recs) if v is not None]
+            if pk_vals:
+                pk_cells.append(f"{sum(pk_vals) / len(pk_vals):>6.2f}")
+            else:
+                pk_cells.append(f"{'-':>6}")
+        pk_str = " ".join(pk_cells)
         mt = sum(r["avg_turns"] for r in recs) / n
         ti = sum(r["total_input_tokens"] for r in recs)
         to = sum(r["total_output_tokens"] for r in recs)
         tt = ti + to
         line = (
-            f"  {'':2}{k:<24} {n:>4} {mp1:>6.2f} {mpk_str} "
+            f"  {'':2}{k_label:<24} {n:>4} {mp1:>6.2f} {pk_str} "
             f"{mt:>6.1f} {_fmt_count(tt):>10}"
-        )
+        ).rstrip()
         if has_cost:
             c = _estimate_cost(ti, to, model_slug)
             line += f" {'${:,.2f}'.format(c):>10}"
@@ -938,30 +983,25 @@ def plot_quality(
     model_name: Optional[str] = None,
     model_slug: Optional[str] = None,
     harness: str = "bash",
-    pass_k_target: int = 8,
+    pass_k_ladder: Optional[List[int]] = None,
 ) -> None:
     """Generate quality analysis plots (bar charts + pass@k curve).
 
-    *pass_k_target* is the "ceiling" k for the second-row bar charts (Pass@K
-    by Domain, by Task Complexity, ...). Resolved per-corpus so a smoke run
-    sampled at NUM_SOLUTIONS=4 produces honest pass@4 plots, not pass@8
-    plots full of "-" cells. Tasks without a value at this k are excluded
-    from that specific aggregate, with a per-bar ``n=`` label so it's
-    visible.
+    For each K in *pass_k_ladder* (e.g. ``[4, 8]`` on a uniform-NUM_SOLUTIONS=8
+    corpus) we emit one set of bar charts (``quality_pass{K}_by_domain.png``,
+    ...). pass@1 charts are always emitted. A separate
+    ``quality_num_success_distribution.png`` shows the per-num_runs
+    histogram of ``num_success`` (i.e. how many tasks got 0/N right, 1/N,
+    ..., N/N), which makes a corpus's "easy / medium / hard" split visible
+    at a glance.
     """
+    if pass_k_ladder is None:
+        pass_k_ladder = []
     out_dir.mkdir(parents=True, exist_ok=True)
     solved = [r for r in records if r["has_solutions"] and r["pass@1"] is not None]
     if not solved:
         print("  No solution data available for quality plots.")
         return
-
-    # Project the dynamic pass@K value onto a stable record key the
-    # _bar_chart helper can read by name. We materialise it here (instead of
-    # threading a callable into _bar_chart) because some records may not
-    # have a value at K — _bar_chart already skips ``None`` values.
-    pk_field = f"pass@k_target"
-    for r in solved:
-        r[pk_field] = _pass_at_k(r, pass_k_target)
 
     tag_pieces = []
     if model_name:
@@ -970,8 +1010,6 @@ def plot_quality(
         tag_pieces.append(harness)
     tag = f" [{' / '.join(tag_pieces)}]" if tag_pieces else ""
     all_domains = sorted({r["domain"] for r in records})
-    pk_label = f"Pass@{pass_k_target}" if pass_k_target else "Pass@-"
-    pk_fname = f"pass{pass_k_target}" if pass_k_target else "passK"
 
     # -- pass@1 charts --
     _bar_chart(
@@ -990,25 +1028,46 @@ def plot_quality(
         out_dir, color="mediumpurple", expected_keys=_CMD_COMPLEXITY_ORDER,
     )
 
-    # -- pass@K (pass-at-any) charts — K is resolved per-corpus --
-    _bar_chart(
-        solved, "domain", pk_field, f"Mean {pk_label.lower()}",
-        f"{pk_label} by Domain{tag}",
-        f"quality_{pk_fname}_by_domain.png",
-        out_dir, color="royalblue", expected_keys=all_domains,
-    )
-    _bar_chart(
-        solved, "task_complexity", pk_field, f"Mean {pk_label.lower()}",
-        f"{pk_label} by Task Complexity{tag}",
-        f"quality_{pk_fname}_by_task_complexity.png",
-        out_dir, color="coral", expected_keys=_TASK_COMPLEXITY_ORDER,
-    )
-    _bar_chart(
-        solved, "command_complexity", pk_field, f"Mean {pk_label.lower()}",
-        f"{pk_label} by Command Complexity{tag}",
-        f"quality_{pk_fname}_by_command_complexity.png",
-        out_dir, color="orchid", expected_keys=_CMD_COMPLEXITY_ORDER,
-    )
+    # -- pass@K (pass-at-any) charts — one set per K in the ladder --
+    # Different K's get distinct colors so visually scanning the directory
+    # makes it obvious which is which.
+    _PK_COLORS_PRIMARY = {
+        4: ("royalblue", "coral", "orchid"),  # (domain, task_cplx, cmd_cplx)
+        8: ("midnightblue", "firebrick", "rebeccapurple"),
+    }
+    _PK_COLORS_V2 = {
+        4: ("royalblue", "coral", "orchid", "peru"),  # 4 v2 axes
+        8: ("midnightblue", "firebrick", "rebeccapurple", "saddlebrown"),
+    }
+    for K in pass_k_ladder:
+        # Project pass@K for this iteration onto a stable record key. We
+        # write a fresh field on each loop so _bar_chart can read by name.
+        pk_field = f"_pass_at_k_{K}"
+        for r in solved:
+            r[pk_field] = _pass_at_k(r, K)
+        pk_label = f"Pass@{K}"
+        pk_fname = f"pass{K}"
+        c_dom, c_tc, c_cc = _PK_COLORS_PRIMARY.get(
+            K, ("royalblue", "coral", "orchid")
+        )
+        _bar_chart(
+            solved, "domain", pk_field, f"Mean {pk_label.lower()}",
+            f"{pk_label} by Domain{tag}",
+            f"quality_{pk_fname}_by_domain.png",
+            out_dir, color=c_dom, expected_keys=all_domains,
+        )
+        _bar_chart(
+            solved, "task_complexity", pk_field, f"Mean {pk_label.lower()}",
+            f"{pk_label} by Task Complexity{tag}",
+            f"quality_{pk_fname}_by_task_complexity.png",
+            out_dir, color=c_tc, expected_keys=_TASK_COMPLEXITY_ORDER,
+        )
+        _bar_chart(
+            solved, "command_complexity", pk_field, f"Mean {pk_label.lower()}",
+            f"{pk_label} by Command Complexity{tag}",
+            f"quality_{pk_fname}_by_command_complexity.png",
+            out_dir, color=c_cc, expected_keys=_CMD_COMPLEXITY_ORDER,
+        )
 
     # -- turns charts --
     _bar_chart(
@@ -1031,16 +1090,13 @@ def plot_quality(
             return None
         return [k for k in order if k in seen] + sorted(seen - set(order))
 
-    for field, order, color_p1, color_p8, color_t in [
-        ("verifier_kind", _VERIFIER_KIND_ORDER,
-         "steelblue", "royalblue", "teal"),
-        ("fixture_kind", _FIXTURE_KIND_ORDER,
-         "darkorange", "coral", "seagreen"),
-        ("corpus_kind", _CORPUS_KIND_ORDER,
-         "mediumpurple", "orchid", "darkslateblue"),
-        ("base_image", _BASE_IMAGE_ORDER,
-         "saddlebrown", "peru", "olive"),
-    ]:
+    v2_axes = [
+        ("verifier_kind", _VERIFIER_KIND_ORDER, "steelblue", "teal"),
+        ("fixture_kind", _FIXTURE_KIND_ORDER, "darkorange", "seagreen"),
+        ("corpus_kind", _CORPUS_KIND_ORDER, "mediumpurple", "darkslateblue"),
+        ("base_image", _BASE_IMAGE_ORDER, "saddlebrown", "olive"),
+    ]
+    for field, order, color_p1, color_t in v2_axes:
         keys = _seen_keys(field, order)
         if keys is None:
             continue
@@ -1051,23 +1107,29 @@ def plot_quality(
             out_dir, color=color_p1, expected_keys=keys,
         )
         _bar_chart(
-            solved, field, pk_field, f"Mean {pk_label.lower()}",
-            f"{pk_label} by {pretty}{tag}",
-            f"quality_{pk_fname}_by_{field}.png",
-            out_dir, color=color_p8, expected_keys=keys,
-        )
-        _bar_chart(
             solved, field, "avg_turns", "Avg Turns",
             f"Average Turns by {pretty}{tag}", f"quality_turns_by_{field}.png",
             out_dir, color=color_t, expected_keys=keys,
         )
+        for K_idx, K in enumerate(pass_k_ladder):
+            pk_field = f"_pass_at_k_{K}"
+            v2_palette = _PK_COLORS_V2.get(K, ("royalblue",) * 4)
+            color_pk = v2_palette[
+                {"verifier_kind": 0, "fixture_kind": 1,
+                 "corpus_kind": 2, "base_image": 3}.get(field, 0)
+            ]
+            _bar_chart(
+                solved, field, pk_field, f"Mean pass@{K}",
+                f"Pass@{K} by {pretty}{tag}",
+                f"quality_pass{K}_by_{field}.png",
+                out_dir, color=color_pk, expected_keys=keys,
+            )
 
     # --- Pass@k curve (averaged across tasks) ---
     # Build directly from records (which already cache pass_at_k_full) so we
-    # don't re-read JSON. Plot every k present, but draw a vertical guide
-    # line at the corpus-wide common ceiling K to make ragged k corpora
-    # visually obvious. Each point is annotated with n = #tasks contributing
-    # at that k.
+    # don't re-read JSON. Plot every k present, but draw vertical guide
+    # lines at the ladder K's to make ragged-k corpora visually obvious.
+    # Each point is annotated with n = #tasks contributing at that k.
     all_pass_at_k: Dict[int, List[float]] = defaultdict(list)
     for r in solved:
         for k, v in (r.get("pass_at_k_full") or {}).items():
@@ -1093,20 +1155,90 @@ def plot_quality(
         )
         ax.set_ylim(0, 1.10)
         ax.grid(True, alpha=0.3)
-        # Draw a guide line at the corpus-wide common ceiling K — beyond
-        # this k the curve is averaged over a strict subset of tasks (tasks
-        # that were sampled at a higher NUM_SOLUTIONS), so the right tail
-        # is not directly comparable to the left.
-        if pass_k_target and pass_k_target in all_pass_at_k:
-            ax.axvline(
-                pass_k_target, color="gray", linestyle="--", alpha=0.5,
-                label=f"common ceiling k={pass_k_target}",
-            )
+        for K in pass_k_ladder:
+            if K in all_pass_at_k:
+                ax.axvline(
+                    K, color="gray", linestyle="--", alpha=0.5,
+                    label=f"ladder k={K}",
+                )
+        if pass_k_ladder:
             ax.legend(loc="lower right", fontsize=8)
         fig.tight_layout()
         fig.savefig(out_dir / "quality_pass_at_k.png", dpi=150, bbox_inches="tight")
         plt.close(fig)
         print(f"  Saved {out_dir / 'quality_pass_at_k.png'}")
+
+    # --- num_success distribution histogram ---
+    # For each unique NUM_SOLUTIONS group, count how many tasks landed at
+    # each num_success value 0..NUM_SOLUTIONS. This separates "easy" tasks
+    # (large bar at N/N) from "hard" tasks (large bar at 0/N) at a glance —
+    # complementary to the mean pass@k aggregates which collapse the shape.
+    _plot_num_success_distribution(solved, out_dir, tag)
+
+
+def _plot_num_success_distribution(
+    solved: List[Dict[str, Any]],
+    out_dir: Path,
+    tag: str = "",
+) -> None:
+    """Render ``quality_num_success_distribution.png``.
+
+    For each NUM_SOLUTIONS group (= unique ``num_runs`` value among solved
+    records), emit a side-by-side bar chart of "tasks with X successes out
+    of N" for X in 0..N. Ragged corpora (e.g. some tasks at NUM_SOLUTIONS=4,
+    others at 8) get one subplot per group so the bin-width difference is
+    explicit instead of papered over.
+    """
+    by_runs: Dict[int, List[int]] = defaultdict(list)
+    for r in solved:
+        n_runs = int(r.get("num_runs", 0))
+        n_succ = int(r.get("num_success", 0))
+        if n_runs <= 0:
+            continue
+        by_runs[n_runs].append(n_succ)
+    if not by_runs:
+        return
+
+    groups = sorted(by_runs.items())  # [(num_runs, [success_counts])]
+    n_groups = len(groups)
+    fig, axes = plt.subplots(
+        nrows=n_groups, ncols=1,
+        figsize=(max(8, max(n_runs for n_runs, _ in groups) * 0.9),
+                 3.5 * n_groups),
+        squeeze=False,
+    )
+    for ax, (n_runs, successes) in zip(axes[:, 0], groups):
+        counts = Counter(successes)
+        xs = list(range(n_runs + 1))
+        ys = [counts.get(x, 0) for x in xs]
+        bars = ax.bar(
+            xs, ys,
+            color=["firebrick" if x == 0
+                   else ("forestgreen" if x == n_runs else "steelblue")
+                   for x in xs],
+            edgecolor="black", linewidth=0.5,
+        )
+        ax.set_xticks(xs)
+        ax.set_xticklabels([f"{x}/{n_runs}" for x in xs], fontsize=9)
+        ax.set_ylabel(f"# tasks (n={len(successes)})")
+        ax.set_title(
+            f"Solution Success Distribution — NUM_SOLUTIONS={n_runs}{tag}",
+            fontweight="bold",
+        )
+        ax.grid(axis="y", alpha=0.3)
+        for bar, y in zip(bars, ys):
+            if y == 0:
+                continue
+            ax.text(
+                bar.get_x() + bar.get_width() / 2,
+                bar.get_height(),
+                str(y), ha="center", va="bottom", fontsize=8,
+            )
+    fig.tight_layout()
+    out_path = out_dir / "quality_num_success_distribution.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {out_path}")
 
 
 def _analyze_model(
@@ -1123,19 +1255,21 @@ def _analyze_model(
     and any v2 harness (suffixed filename ``<slug>_<HARNESS>_summary.json``,
     e.g. ``vanillux``).
 
-    *pass_k_override*: when None (default), the "ceiling k" for aggregates
-    is auto-detected as the largest k that every solved task has data for
-    (i.e. ``min(NUM_SOLUTIONS over solved tasks)``). When set, that k is
-    used directly — useful for comparing two corpora at a fixed k.
+    *pass_k_override*: when ``None`` (default), the K-ladder is auto-resolved
+    as every k in :data:`_DEFAULT_PASS_K_LADDER` for which ≥1 solved task
+    has data (so a uniform NUM_SOLUTIONS=8 corpus reports both pass@4 AND
+    pass@8). When set, the ladder collapses to ``[override]`` — useful for
+    comparing two corpora at a fixed k.
     """
     display = model_slug.replace("_", "/", 1)
 
     records = load_tasks(tasks_dir, model_slug=model_slug, harness=harness)
 
-    # Resolve the per-corpus pass@K ceiling once. If no solved tasks exist
-    # we fall back to k=8 (legacy default) so the column header still says
-    # something sensible — every cell will be "-" anyway.
-    pk_target = _resolve_pass_k(records, override=pass_k_override) or 8
+    # Resolve the per-corpus pass@K ladder once. Fall back to [8] when
+    # there are no solved tasks so column headers are still sensible.
+    pk_ladder = _resolve_pass_k_ladder(records, override=pass_k_override)
+    if not pk_ladder:
+        pk_ladder = [8]
 
     # Keep bash output dirs at the legacy location; isolate non-bash harness
     # plots so a side-by-side bash+vanillux run on the same model produces
@@ -1144,13 +1278,13 @@ def _analyze_model(
     model_dir = plots_base / sub
     print_summary(records, model_name=display, model_slug=model_slug,
                   max_rows=max_rows, harness=harness,
-                  pass_k_target=pk_target)
+                  pass_k_ladder=pk_ladder)
 
     label = display if harness == "bash" else f"{display} [{harness}]"
     print(f"Generating quality plots for {label}...")
     plot_quality(records, model_dir, model_name=display,
                  model_slug=model_slug, harness=harness,
-                 pass_k_target=pk_target)
+                 pass_k_ladder=pk_ladder)
 
     print(f"Done. Model plots saved to {model_dir}/")
 
@@ -1206,12 +1340,12 @@ def main():
         type=int,
         default=None,
         help=(
-            "Override the 'ceiling' k used in pass@K aggregates and bar "
-            "charts. Default: auto-detect the largest k that every solved "
-            "task has data for (= min of NUM_SOLUTIONS across solved tasks). "
-            "This makes the smoke-vs-full comparison honest — a 50-task "
-            "smoke sampled at NUM_SOLUTIONS=4 produces pass@4 plots, not "
-            "pass@8 plots full of '-'."
+            "Force the K-ladder to a single value. Default: auto-detect — "
+            "report every k in (4, 8) for which at least one solved task "
+            "has data. So a uniform NUM_SOLUTIONS=8 corpus shows both "
+            "pass@4 AND pass@8 columns/plots; a NUM_SOLUTIONS=4 smoke "
+            "shows only pass@4. Tasks without a value at a given k are "
+            "excluded from that cell only (n-counts are surfaced)."
         ),
     )
     args = ap.parse_args()

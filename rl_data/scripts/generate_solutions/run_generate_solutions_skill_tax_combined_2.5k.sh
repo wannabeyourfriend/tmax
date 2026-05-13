@@ -5,8 +5,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --gres=gpu:h200:8
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=960G
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=1460G
 
 # ╔═══════════════════════════════════════════════════════════════════════╗
 # ║  Run our solution-generation harness on the COMBINED 2.5k SFT corpus  ║
@@ -50,10 +50,10 @@
 # ║  wall time again) — both nodes write to the same TASKS_DIR safely:    ║
 # ║                                                                        ║
 # ║      # node A                                                         ║
-# ║      START_AT=0    NUM_TASKS=1250 \                                   ║
+# ║      START_AT=0    NUM_TASKS=1100 \                                   ║
 # ║          bash run_generate_solutions_skill_tax_combined_2.5k.sh       ║
 # ║      # node B                                                         ║
-# ║      START_AT=1250 NUM_TASKS=1250 \                                   ║
+# ║      START_AT=1100 NUM_TASKS=1100 \                                   ║
 # ║          bash run_generate_solutions_skill_tax_combined_2.5k.sh       ║
 # ║                                                                        ║
 # ║  No write contention: each task's solutions/ subdir is written by    ║
@@ -239,13 +239,32 @@ export APPTAINER_CACHEDIR="/gpfs/projects/h2lab/osey/apptainer_cache"
 export APPTAINER_TMPDIR="/tmp/apptainer_tmp"
 mkdir -p "$APPTAINER_TMPDIR"
 
-# Keep apptainer instance logs off GPFS; heal dangling symlinks left behind
-# when /tmp was cleaned between runs.
+# Apptainer instance log dir lives on a $HOME/.apptainer/instances -> /tmp
+# symlink so the logs don't pile up on GPFS. Two failure modes guarded here:
+#   1. Boot-time: symlink missing or pointing somewhere stale -> rm + relink.
+#   2. Mid-run: systemd-tmpfiles (or similar) reaps /tmp/apptainer_instances
+#      after it goes empty, leaving the symlink DANGLING. Apptainer then
+#      tries `mkdir(2)` on the symlink path and gets EEXIST (the symlink
+#      itself exists in the namespace), causing 100s of "Instance start
+#      failed: ... mkdir .../instances: file exists" failures and ~10% of
+#      tasks to retry. Boot-time we re-create the target if dangling, AND we
+#      spawn a tiny watchdog that re-creates the target every 5s for the
+#      lifetime of this shell so the race never reopens.
 mkdir -p /tmp/apptainer_instances
+if [ -L "$HOME/.apptainer/instances" ] && [ ! -d "$HOME/.apptainer/instances" ]; then
+  mkdir -p /tmp/apptainer_instances
+fi
 if [ ! -L "$HOME/.apptainer/instances" ]; then
   rm -rf "$HOME/.apptainer/instances"
   ln -s /tmp/apptainer_instances "$HOME/.apptainer/instances"
 fi
+
+( while kill -0 $$ 2>/dev/null; do
+    mkdir -p /tmp/apptainer_instances 2>/dev/null
+    sleep 5
+  done ) >/dev/null 2>&1 &
+_APPTAINER_INSTANCES_WATCHDOG_PID=$!
+disown "$_APPTAINER_INSTANCES_WATCHDOG_PID" 2>/dev/null || true
 
 # Block until the in-job vLLM server is ready (no-op when LAUNCH_VLLM!=1).
 # Also (re)exports MODEL/HOSTED_VLLM_API_BASE/OPENAI_API_KEY for the solver,

@@ -13,6 +13,13 @@ non-bash harnesses (currently just ``vanillux`` →
 ``<MODEL_TAG>_vanillux_summary.json``). Pass ``--harness vanillux`` when
 converting trajectories from a vanillux solve run.
 
+Reasoning-trace runs (Qwen3 ``<think>...</think>`` enabled, see
+``LITELLM_EXTRA_BODY_JSON`` /  ``VLLM_DISABLE_THINKING=0``) get an
+additional ``_thinking`` infix on the summary filename (e.g.
+``<MODEL_TAG>_vanillux_thinking_summary.json``) so they coexist with
+non-thinking runs on the same task dir. Pass ``--thinking`` here whenever
+the matching ``--thinking`` flag was used at solve time.
+
 Schema parity is critical: the parquet emitted here must match the existing
 ``tmax-sft-full-20260409`` configs (Sera / Nemotron / OpenThoughts) so the
 trainer in ``sft/scripts/run_sft_*.sh`` ingests it without modification.
@@ -62,9 +69,17 @@ _MESSAGE_KEYS = ("content", "reasoning_content", "role", "tool_call_ids", "tool_
 _DEFAULT_JSON_STRATEGY_COUNTS = {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
 
 
-# OpenAI-style tools schema we expose to the model.  The rl_data harness
-# offers exactly one tool to the agent (`bash`); embed its full JSON-Schema
-# spec on every row so SFT trainers can drop it into
+# OpenAI-style tools schema we expose to the model.  Both the legacy bash
+# harness (rl_data.generator.sample_solutions) and the vanillux harness
+# (rl_data.generator.vanillux_solver) load the *same* spec from
+# ``sft/preprocessing/config/tool_schemas.json`` at solve time -- exactly
+# one tool, ``bash``, backed by a persistent PTY shell. To keep the
+# parquet's `tools` column truthful, we load that same file here rather
+# than hardcoding the spec (the previous embedded constant carried a
+# stale "Each command runs in a new subshell" description that didn't
+# match how the harness actually behaves).
+#
+# Embedded on every row so SFT trainers can drop it into
 # ``tokenizer.apply_chat_template(..., tools=json.loads(row["tools"]))``
 # without any extra metadata.
 #
@@ -75,25 +90,60 @@ _DEFAULT_JSON_STRATEGY_COUNTS = {"0": 0, "1": 0, "2": 0, "3": 0, "4": 0, "5": 0}
 # trips losslessly via ``json.loads`` and matches the convention used by
 # datasets like glaiveai/glaive-function-calling-v2 and
 # Salesforce/xlam-function-calling-60k.
-_BASH_TOOL: dict[str, Any] = {
+_TOOL_SCHEMAS_PATH = Path(__file__).resolve().parent / "config" / "tool_schemas.json"
+
+# Defensive fallback: shape-equivalent to the canonical config, used only
+# when the config file is missing (e.g. running this module from an
+# unusual checkout layout). Description matches the canonical file so a
+# fallback never surprises downstream users with stale text.
+_BASH_TOOL_FALLBACK: dict[str, Any] = {
+    "type": "function",
     "function": {
-        "description": "Execute a bash command. Each command runs in a new subshell.",
         "name": "bash",
+        "description": (
+            "Execute a bash command in a persistent shell. Working "
+            "directory and environment variables are preserved between calls."
+        ),
         "parameters": {
+            "type": "object",
             "properties": {
                 "command": {
-                    "description": "The bash command to execute.",
                     "type": "string",
+                    "description": "The bash command to execute.",
                 },
             },
             "required": ["command"],
-            "type": "object",
         },
     },
-    "type": "function",
 }
 
-_DEFAULT_TOOLS_JSON = json.dumps([_BASH_TOOL], ensure_ascii=False)
+
+def _load_default_tools_json() -> str:
+    """Return the canonical tools spec as a JSON string.
+
+    Source of truth is ``sft/preprocessing/config/tool_schemas.json`` (the
+    same file both rl_data harnesses load at solve time). We pretty-tolerate
+    both raw-array and pretty-printed forms by re-serialising via
+    ``json.dumps`` so the on-disk parquet column is always a compact
+    single-line JSON string.
+    """
+    try:
+        parsed = json.loads(_TOOL_SCHEMAS_PATH.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        logger.warning(
+            "Canonical tool_schemas.json not found at %s; falling back to "
+            "embedded bash-tool spec.",
+            _TOOL_SCHEMAS_PATH,
+        )
+        parsed = [_BASH_TOOL_FALLBACK]
+    if not isinstance(parsed, list):
+        raise RuntimeError(
+            f"Expected a JSON array in {_TOOL_SCHEMAS_PATH}, got {type(parsed).__name__}"
+        )
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+_DEFAULT_TOOLS_JSON = _load_default_tools_json()
 
 
 def _model_tag_to_canonical(tag: str) -> str:
@@ -249,6 +299,7 @@ def _row_for_result(
     source_model: str,
     summary_mtime_iso: str,
     tools_json: str = _DEFAULT_TOOLS_JSON,
+    thinking: bool = False,
 ) -> dict[str, Any] | None:
     """Convert one trajectory (one entry in `summary['results']`) into the
     parquet row shape.  Returns None when the trajectory has no messages
@@ -267,7 +318,13 @@ def _row_for_result(
 
     metadata = {
         "date": summary_mtime_iso,
-        "enable_thinking": False,  # our local-vLLM runs all set enable_thinking=false
+        # Mirrors solve-time `--thinking` (which routes us to the
+        # `_thinking_summary.json` file); when set, every assistant turn
+        # was sampled with `chat_template_kwargs.enable_thinking=true` and
+        # the `reasoning_content` column carries the model's <think>…</think>
+        # trace. Downstream filters that gate on reasoning-rich data should
+        # key off this flag rather than infer it from the source label.
+        "enable_thinking": bool(thinking),
         "episode": f"sol-{result_index}",
         "has_ctrl_c": False,        # n/a for the rl_data harness loop
         "has_task_complete": has_task_complete,
@@ -299,28 +356,40 @@ def _row_for_result(
     }
 
 
-def _summary_basename(model_tag: str, harness: str) -> str:
+def _summary_basename(model_tag: str, harness: str, thinking: bool = False) -> str:
     """Mirror ``rl_data.generate_solutions._summary_basename``.
 
-    Bash keeps the legacy ``<MODEL_TAG>_summary.json`` filename; non-bash
-    harnesses get a harness suffix so they can coexist on disk with bash
-    summaries on the same task (no overwriting, no cp-r dance).
+    Bash + no-thinking keeps the legacy ``<MODEL_TAG>_summary.json`` filename;
+    non-bash harnesses and thinking-mode runs each contribute their own infix
+    so all four (harness, thinking) combinations can coexist in the same task
+    dir without overwriting one another:
+
+      * ``<MODEL_TAG>_summary.json``                     — bash, thinking off
+      * ``<MODEL_TAG>_thinking_summary.json``            — bash, thinking on
+      * ``<MODEL_TAG>_<harness>_summary.json``           — non-bash, thinking off
+      * ``<MODEL_TAG>_<harness>_thinking_summary.json``  — non-bash, thinking on
     """
-    suffix = "" if harness == "bash" else f"_{harness}"
-    return f"{model_tag}{suffix}_summary.json"
+    parts = [model_tag]
+    if harness != "bash":
+        parts.append(harness)
+    if thinking:
+        parts.append("thinking")
+    parts.append("summary.json")
+    return "_".join(parts)
 
 
 def _scan_tasks(
     tasks_dir: Path,
     model_tag: str,
     harness: str = "bash",
+    thinking: bool = False,
 ) -> list[tuple[Path, Path]]:
     """Return [(task_dir, summary_path), ...] for every task with a summary
-    matching the given (model_tag, harness) pair.
+    matching the given (model_tag, harness, thinking) triple.
 
     Sorted by task_dir.name so output is deterministic across runs.
     """
-    summary_name = _summary_basename(model_tag, harness)
+    summary_name = _summary_basename(model_tag, harness, thinking)
     pairs: list[tuple[Path, Path]] = []
     for child in sorted(tasks_dir.iterdir()):
         if not child.is_dir():
@@ -355,6 +424,7 @@ def convert(
     source_label: str | None = None,
     tools_json: str = _DEFAULT_TOOLS_JSON,
     harness: str = "bash",
+    thinking: bool = False,
 ) -> dict[str, Any]:
     """Walk the trajectories under ``tasks_dir`` and write a parquet to
     ``output_dir/<name>.parquet`` plus a ``<name>.report.json`` summary.
@@ -364,6 +434,11 @@ def convert(
     was invoked with at solve time. ``"bash"`` (default) reads the legacy
     ``<MODEL_TAG>_summary.json``; ``"vanillux"`` reads
     ``<MODEL_TAG>_vanillux_summary.json``.
+
+    ``thinking=True`` adds a ``_thinking`` infix so reasoning-trace runs
+    (Qwen3 ``<think>...</think>`` enabled) read their own summary file
+    instead of the non-thinking one. Must match the ``--thinking`` flag
+    passed to ``generate_solutions.py``.
 
     Returns the report dict (also written to disk).
     """
@@ -376,8 +451,8 @@ def convert(
         # synthetic identifier so HF Datasets viewers can filter by it.
         source_label = f"tmax-rl-trajectories/{tasks_dir.name}/{canonical_model}"
 
-    summary_basename = _summary_basename(model_tag, harness)
-    pairs = _scan_tasks(tasks_dir, model_tag, harness=harness)
+    summary_basename = _summary_basename(model_tag, harness, thinking)
+    pairs = _scan_tasks(tasks_dir, model_tag, harness=harness, thinking=thinking)
     logger.info(
         "Scanning %s for %s -> %d task(s) with a summary",
         tasks_dir, summary_basename, len(pairs),
@@ -424,6 +499,7 @@ def convert(
                 source_model=canonical_model,
                 summary_mtime_iso=summary_mtime_iso,
                 tools_json=tools_json,
+                thinking=thinking,
             )
             if row is None:
                 n_traj_dropped_empty += 1
@@ -548,6 +624,16 @@ def _main() -> None:
              "--harness passed to the solve script.",
     )
     p.add_argument(
+        "--thinking",
+        action="store_true",
+        help="Read the reasoning-trace variant of the summary file: appends a "
+             "`_thinking` infix to the filename (e.g. "
+             "<MODEL_TAG>_vanillux_thinking_summary.json instead of "
+             "<MODEL_TAG>_vanillux_summary.json). Must match the --thinking "
+             "flag passed to the solve script so we read the trajectories "
+             "actually sampled with reasoning enabled, not the non-thinking ones.",
+    )
+    p.add_argument(
         "--source-label",
         default=None,
         help="Override the auto-generated 'source' field on every row "
@@ -595,6 +681,7 @@ def _main() -> None:
         source_label=args.source_label,
         tools_json=tools_json,
         harness=args.harness,
+        thinking=args.thinking,
     )
     elapsed = time.time() - t0
     logger.info("Done in %.1fs.  Report: %s", elapsed, json.dumps(report, indent=2))

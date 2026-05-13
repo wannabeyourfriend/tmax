@@ -41,16 +41,47 @@ cd "${_SCRIPT_DIR}/.."
 #   HARNESS=vanillux \
 #     bash sft/scripts/run_conversion_skill_tax_1k.sh
 #
-#   # Convert the combined-2.5k SFT corpus (vanillux trajectories from both
-#   # local-Qwen and Gemini teachers) — full env override for that corpus:
-#   TASKS_DIR=rl_data/output/tasks_skill_tax_combined_20260506_2.5k \
+#   # Convert reasoning-trace (thinking-mode) trajectories. Reads
+#   # <task>/solutions/<MODEL_TAG>[_<HARNESS>]_thinking_summary.json. Must
+#   # match the --thinking flag passed to the solve script.
+#   THINKING=1 HARNESS=vanillux \
+#     bash sft/scripts/run_conversion_skill_tax_1k.sh
+#
+#   # Convert the 2.2k_combined_balanced SFT corpus (vanillux trajectories
+#   # from local-Qwen3.6-27B teacher) — the canonical post-pivot SFT run:
+#   TASKS_DIR=/gpfs/scrubbed/osey/tmax/rl_data/output/tasks_skill_tax_20260505_2.2k_combined_balanced \
 #   MODEL_TAG=hosted_vllm_Qwen_Qwen3.6-27B \
 #   HARNESS=vanillux \
-#   OUTPUT_DIR=output/preprocessing/skill_tax_combined_20260506_2.5k \
-#   HF_REPO=osieosie/tmax-sft-skill-tax-combined-20260506-2.5k \
-#   NAME_ALL=skill_tax_combined_20260506_2.5k_all \
-#   NAME_ONLY_SUCCESS=skill_tax_combined_20260506_2.5k_only_success \
+#   OUTPUT_DIR=output/preprocessing/skill_tax_20260505_2.2k_combined_balanced \
+#   HF_REPO=osieosie/tmax-sft-skill-tax-20260505-2.2k-combined-balanced-qwen3.6-27b \
+#   NAME_ALL=skill_tax_20260505_2.2k_combined_balanced_all \
+#   NAME_ONLY_SUCCESS=skill_tax_20260505_2.2k_combined_balanced_only_success \
 #     bash sft/scripts/run_conversion_skill_tax_1k.sh
+#
+#   # Same corpus, thinking-mode trajectories from
+#   # run_generate_solutions_skill_tax_combined_2.5k_thinking.sh — note the
+#   # _thinking suffix on every output name so we don't clobber the
+#   # non-thinking conversion's parquets / HF configs:
+#   THINKING=1 \
+#   TASKS_DIR=/gpfs/scrubbed/osey/tmax/rl_data/output/tasks_skill_tax_20260505_2.2k_combined_balanced \
+#   MODEL_TAG=hosted_vllm_Qwen_Qwen3.6-27B \
+#   HARNESS=vanillux \
+#   OUTPUT_DIR=output/preprocessing/skill_tax_20260505_2.2k_combined_balanced_thinking \
+#   HF_REPO=osieosie/tmax-sft-skill-tax-20260505-2.2k-combined-balanced-qwen3.6-27b-thinking \
+#   NAME_ALL=skill_tax_20260505_2.2k_combined_balanced_thinking_all \
+#   NAME_ONLY_SUCCESS=skill_tax_20260505_2.2k_combined_balanced_thinking_only_success \
+#     bash sft/scripts/run_conversion_skill_tax_1k.sh
+#
+#   # Older example (kept for reference; the corpus dir below was an interim
+#   # name and may not exist on every checkout):
+#   #   TASKS_DIR=rl_data/output/tasks_skill_tax_combined_20260506_2.5k \
+#   #   MODEL_TAG=hosted_vllm_Qwen_Qwen3.6-27B \
+#   #   HARNESS=vanillux \
+#   #   OUTPUT_DIR=output/preprocessing/skill_tax_combined_20260506_2.5k \
+#   #   HF_REPO=osieosie/tmax-sft-skill-tax-combined-20260506-2.5k \
+#   #   NAME_ALL=skill_tax_combined_20260506_2.5k_all \
+#   #   NAME_ONLY_SUCCESS=skill_tax_combined_20260506_2.5k_only_success \
+#   #     bash sft/scripts/run_conversion_skill_tax_1k.sh
 #
 # Requirements (for upload):
 #   - hf auth login   (or HF_TOKEN env var set)
@@ -66,6 +97,11 @@ MODEL_TAG="${MODEL_TAG:-hosted_vllm_Qwen_Qwen3.5-27B}"
 #   bash      -> <MODEL_TAG>_summary.json            (legacy 1k / 10k)
 #   vanillux  -> <MODEL_TAG>_vanillux_summary.json   (combined 2.5k, rl_v2 5k)
 HARNESS="${HARNESS:-bash}"
+# THINKING=1 reads the reasoning-trace variant of the summary (adds a
+# `_thinking` infix: e.g. <MODEL_TAG>_vanillux_thinking_summary.json). Must
+# match the --thinking flag passed to the solve script. Default 0 so the
+# legacy 1k corpus default invocation still resolves to the legacy filename.
+THINKING="${THINKING:-0}"
 # Output dir under sft/output/preprocessing/ -- the timestamp is fixed in the
 # default name so re-runs land in the same place (overwriting prior parquets);
 # bump the suffix when you want a clean re-conversion.
@@ -91,14 +127,26 @@ while [[ $# -gt 0 ]]; do
         --tasks-dir)  TASKS_DIR="$2"; shift 2 ;;
         --model-tag)  MODEL_TAG="$2"; shift 2 ;;
         --harness)    HARNESS="$2"; shift 2 ;;
+        --thinking)   THINKING=1; shift ;;
+        --no-thinking) THINKING=0; shift ;;
         *)            echo "Unknown arg: $1"; exit 1 ;;
     esac
 done
+
+# Compose the optional --thinking flag once so the two convert calls below
+# stay concise. Bash's ${var:+expr} trick: expand to "--thinking" when
+# THINKING is "1", otherwise to the empty string. Quoted in array form so
+# an empty value collapses to zero argv tokens (vs an empty positional arg).
+THINKING_ARGS=()
+if [[ "${THINKING}" == "1" ]]; then
+    THINKING_ARGS+=(--thinking)
+fi
 
 echo "=== skill_tax 1k trajectory -> SFT conversion ==="
 echo "  Tasks dir:   ${TASKS_DIR}"
 echo "  Model tag:   ${MODEL_TAG}"
 echo "  Harness:     ${HARNESS}"
+echo "  Thinking:    ${THINKING}"
 echo "  Output dir:  ${OUTPUT_DIR}"
 echo "  HF repo:     ${HF_REPO}"
 echo "  Upload:      ${UPLOAD}"
@@ -112,6 +160,7 @@ uv run python -m preprocessing.convert_trajectories \
     --tasks-dir "${TASKS_DIR}" \
     --model-tag "${MODEL_TAG}" \
     --harness "${HARNESS}" \
+    "${THINKING_ARGS[@]}" \
     --output-dir "${OUTPUT_DIR}" \
     --name "${NAME_ALL}"
 
@@ -122,6 +171,7 @@ uv run python -m preprocessing.convert_trajectories \
     --tasks-dir "${TASKS_DIR}" \
     --model-tag "${MODEL_TAG}" \
     --harness "${HARNESS}" \
+    "${THINKING_ARGS[@]}" \
     --output-dir "${OUTPUT_DIR}" \
     --name "${NAME_ONLY_SUCCESS}" \
     --filter-success

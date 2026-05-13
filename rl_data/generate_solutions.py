@@ -22,19 +22,30 @@ from rl_data.generator.sample_solutions import run_n_solutions
 from rl_data.generator.vanillux_solver import run_n_solutions_vanillux
 
 
-def _summary_basename(model: str, harness: str) -> str:
-    """Return the per-task solutions-summary filename for a (model, harness) pair.
+def _summary_basename(model: str, harness: str, thinking: bool = False) -> str:
+    """Return the per-task solutions-summary filename for a (model, harness, thinking) triple.
 
-    Bash runs preserve the legacy ``<MODEL_TAG>_summary.json`` name byte-for-byte
-    so existing summaries in skill_tax 1k / 10k corpora keep matching. Non-bash
-    runs (currently just ``vanillux``) get a harness suffix so a single task
-    directory can carry summaries from BOTH harnesses side-by-side without one
-    overwriting the other (essential for harness A/B comparisons).
+    Bash, no-thinking runs preserve the legacy ``<MODEL_TAG>_summary.json`` name
+    byte-for-byte so existing summaries in skill_tax 1k / 10k corpora keep
+    matching. Non-bash runs (currently just ``vanillux``) get a harness suffix,
+    and runs with reasoning (``<think>...</think>``) traces enabled get an
+    additional ``_thinking`` suffix, so all four (harness, thinking) combinations
+    can coexist on disk in the same task dir without overwriting one another.
+
+    Resulting filenames:
+      * ``<MODEL_TAG>_summary.json``                       — bash, thinking off
+      * ``<MODEL_TAG>_thinking_summary.json``              — bash, thinking on
+      * ``<MODEL_TAG>_<harness>_summary.json``             — non-bash, thinking off
+      * ``<MODEL_TAG>_<harness>_thinking_summary.json``    — non-bash, thinking on
     """
     model_tag = model.replace("/", "_")
-    if harness == "bash":
-        return f"{model_tag}_summary.json"
-    return f"{model_tag}_{harness}_summary.json"
+    parts = [model_tag]
+    if harness != "bash":
+        parts.append(harness)
+    if thinking:
+        parts.append("thinking")
+    parts.append("summary.json")
+    return "_".join(parts)
 
 
 @dataclass
@@ -90,6 +101,16 @@ class SolutionConfig:
     #: ``bash`` tool surface and the same ``COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT``
     #: submit marker, so the A/B is a clean prompt-richness + budget test.
     harness: str = "bash"
+    #: Whether the underlying chat completions are being sampled with reasoning
+    #: traces (``<think>...</think>``) enabled. Purely a NAMING knob from this
+    #: module's perspective: it adds a ``_thinking`` infix to the per-task
+    #: summary filename so thinking and non-thinking trajectories don't clobber
+    #: each other on shared task dirs (see :func:`_summary_basename`). The
+    #: actual on/off switch lives in the vLLM launcher / litellm extra-body
+    #: (``LITELLM_EXTRA_BODY_JSON={"chat_template_kwargs": {"enable_thinking": true}}``);
+    #: pass ``--thinking`` here ONLY when that's also set, otherwise the
+    #: filename will misrepresent the contents.
+    thinking: bool = False
 
 
 class _TeeTextStream:
@@ -303,7 +324,7 @@ def process_task(task_dir: str, cfg: SolutionConfig):
             base_sifs_dir=cfg.base_sifs_dir,
         )
 
-        summary_name = _summary_basename(cfg.model, cfg.harness)
+        summary_name = _summary_basename(cfg.model, cfg.harness, cfg.thinking)
         _safe_write_text(
             task_dir / "solutions" / summary_name,
             json.dumps(summary, indent=4),
@@ -422,6 +443,20 @@ def parse_args(argv: Optional[List[str]] = None) -> SolutionConfig:
             "truncation; same single bash tool). Used for v2 RL solutions."
         ),
     )
+    ap.add_argument(
+        "--thinking",
+        action="store_true",
+        help=(
+            "Tag the per-task summary filename with a `_thinking` infix so "
+            "trajectories sampled with reasoning traces (Qwen3 <think>...</think>) "
+            "enabled don't clobber non-thinking summaries on the same task "
+            "dir. Use whenever the upstream chat completion is configured "
+            "with `enable_thinking=true` (e.g. via "
+            "LITELLM_EXTRA_BODY_JSON='{\"chat_template_kwargs\": {\"enable_thinking\": true}}'). "
+            "Pass the SAME flag to sft/preprocessing/convert_trajectories.py "
+            "at conversion time so it picks the right summary file."
+        ),
+    )
 
     args = ap.parse_args(argv)
     return SolutionConfig(**vars(args))
@@ -495,7 +530,7 @@ def _run_generate_solutions(cfg: SolutionConfig) -> None:
         def _pass16_gt_zero(task_dir: str) -> bool:
             task_dir = Path(task_dir)
             try:
-                model_summary_path = task_dir / "solutions" / _summary_basename(cfg.model, cfg.harness)
+                model_summary_path = task_dir / "solutions" / _summary_basename(cfg.model, cfg.harness, cfg.thinking)
                 if model_summary_path.exists():
                     return False
                 # Check any existing summary
@@ -640,7 +675,7 @@ def _run_generate_solutions(cfg: SolutionConfig) -> None:
     # ------------------------------------------------------------------
     # Solution phase (high concurrency)
     # ------------------------------------------------------------------
-    model_summary_name = _summary_basename(cfg.model, cfg.harness)
+    model_summary_name = _summary_basename(cfg.model, cfg.harness, cfg.thinking)
 
     def process_task_with_retry(task_dir: str, cfg: SolutionConfig):
         """Wrap per-task retry logic so it can run in parallel."""
