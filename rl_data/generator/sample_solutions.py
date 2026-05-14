@@ -109,7 +109,7 @@ def _extract_tool_call(response_msg: dict) -> Dict[str, Optional[str]]:
         try:
             args = json.loads(args_raw)
         except json.JSONDecodeError:
-            return {"type": "no_tool_call", "command": None, "tool_call_id": tc.get("id")}
+            return {"type": "no_tool_call", "command": None, "tool_call_id": None}
     else:
         args = args_raw
 

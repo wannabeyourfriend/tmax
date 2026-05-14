@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -48,6 +49,11 @@ ABORT_EXCEPTIONS = (
 MAX_RETRIES = 5
 RETRY_BASE_DELAY = 2.0
 _STATE_DIR = "/tmp/.vanillux2"
+_COMPOSE_PROVIDER_RE = re.compile(
+    r"\x1b\[4m>>>> Executing external compose provider "
+    r'"[^"]*docker-compose"\. Please see podman-compose\(1\) for how to disable '
+    r"this message\. <<<<\n\n\x1b\[0m"
+)
 
 
 class Vanillux2Agent(BaseAgent):
@@ -147,10 +153,11 @@ class Vanillux2Agent(BaseAgent):
                     pass
 
                 msg = response.choices[0].message.model_dump()
-                messages.append(msg)
-
                 action = _extract_tool_call(msg)
                 if action["type"] == "no_tool_call":
+                    msg.pop("tool_calls", None)
+                    msg["content"] = msg.get("content") or ""
+                    messages.append(msg)
                     format_errors += 1
                     self._append_format_error(messages, action.get("tool_call_id"))
                     timing_log.append(
@@ -165,6 +172,7 @@ class Vanillux2Agent(BaseAgent):
                         break
                     continue
 
+                messages.append(msg)
                 format_errors = 0
                 command = action.get("command") or ""
                 tool_call_id = action.get("tool_call_id") or ""
@@ -305,5 +313,6 @@ class Vanillux2Agent(BaseAgent):
         output = result.stdout or ""
         if result.stderr:
             output += f"\n{result.stderr}" if output else result.stderr
+        output = _COMPOSE_PROVIDER_RE.sub("", output)
         truncated = _truncate_observation(output) if output else "(no output)"
         return f"{truncated}\n\n(exit_code={result.return_code})"

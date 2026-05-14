@@ -29,7 +29,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Defaults
 REVISION="main"
+VLLM_VERSION="0.19.1"
 SERVED_MODEL_NAME=""
+BEAKER_NAME_OVERRIDE=""
 GPU_COUNT=1
 TP_SIZE=""
 DP_SIZE=""
@@ -37,7 +39,7 @@ PORT=8008
 MAX_MODEL_LEN=""
 TOOL_CALL_PARSER="hermes"
 CLUSTER="ai2/saturn"
-BUDGET="ai2/oe-adapt"
+BUDGET=""
 PRIORITY="high"
 BEAKER_WORKSPACE="${BEAKER_WORKSPACE:-ai2/open-instruct-dev}"
 EXTRA_ARGS=""
@@ -47,14 +49,16 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --revision REV       HuggingFace revision/branch (default: main)"
+    echo "  --vllm-version VER   vLLM package version for uvx (default: 0.19.1)"
     echo "  --name NAME          Served model name (default: derived from model path)"
+    echo "  --beaker-name NAME   Beaker experiment name (default: vllm-<served-name>)"
     echo "  --gpus N             Number of GPUs (default: 1)"
     echo "  --tp N               Tensor parallel size (default: auto — 1 for small models, gpus for large)"
     echo "  --dp N               Data parallel size (default: auto — gpus/tp)"
     echo "  --port PORT          Port to serve on (default: 8008)"
     echo "  --max-model-len LEN  Max context length (default: vllm auto)"
     echo "  --cluster CLUSTER    Beaker cluster (default: ai2/saturn)"
-    echo "  --budget BUDGET      Beaker budget (default: ai2/oe-adapt)"
+    echo "  --budget BUDGET      Beaker budget (default: omitted; uses workspace default)"
     echo "  --priority PRIORITY  Priority: high, normal, low (default: high)"
     echo "  --workspace WS       Beaker workspace (default: ai2/tmax)"
     echo "  --tool-call-parser P Tool call parser (default: hermes)"
@@ -72,7 +76,9 @@ shift
 while [ $# -gt 0 ]; do
     case "$1" in
         --revision) REVISION="$2"; shift 2 ;;
+        --vllm-version) VLLM_VERSION="$2"; shift 2 ;;
         --name) SERVED_MODEL_NAME="$2"; shift 2 ;;
+        --beaker-name) BEAKER_NAME_OVERRIDE="$2"; shift 2 ;;
         --gpus) GPU_COUNT="$2"; shift 2 ;;
         --tp) TP_SIZE="$2"; shift 2 ;;
         --dp) DP_SIZE="$2"; shift 2 ;;
@@ -105,7 +111,7 @@ elif [ -z "$DP_SIZE" ]; then
 fi
 
 # Build the vllm command
-VLLM_CMD="uvx vllm serve ${MODEL_PATH}"
+VLLM_CMD="uvx vllm==${VLLM_VERSION} serve ${MODEL_PATH}"
 VLLM_CMD+=" --revision ${REVISION}"
 VLLM_CMD+=" --tokenizer-revision ${REVISION}"
 VLLM_CMD+=" --served-model-name ${SERVED_MODEL_NAME}"
@@ -124,11 +130,16 @@ if [ -n "${EXTRA_ARGS}" ]; then
     VLLM_CMD+=" ${EXTRA_ARGS}"
 fi
 
-BEAKER_NAME="vllm-${SERVED_MODEL_NAME}"
+BEAKER_NAME="${BEAKER_NAME_OVERRIDE:-vllm-${SERVED_MODEL_NAME}}"
+BUDGET_YAML=""
+if [ -n "$BUDGET" ]; then
+    BUDGET_YAML="budget: ${BUDGET}"
+fi
 
 echo "=== Launching vLLM on Beaker ==="
 echo "  Model:      ${MODEL_PATH}"
 echo "  Revision:   ${REVISION}"
+echo "  vLLM:       ${VLLM_VERSION}"
 echo "  Name:       ${SERVED_MODEL_NAME}"
 echo "  GPUs:       ${GPU_COUNT} (TP=${TP_SIZE}, DP=${DP_SIZE})"
 echo "  Port:       ${PORT}"
@@ -142,7 +153,7 @@ echo ""
 TMP_YAML=$(mktemp /tmp/vllm-beaker-XXXXXXXX).yaml
 cat > "$TMP_YAML" << YAML
 version: v2
-budget: ${BUDGET}
+${BUDGET_YAML}
 description: "VLLM Server: ${SERVED_MODEL_NAME} (${MODEL_PATH}@${REVISION})"
 tasks:
   - name: "vllm-job"

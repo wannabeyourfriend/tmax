@@ -37,6 +37,8 @@ TP_SIZE=""
 DP_SIZE=""
 VLLM_PORT=8008
 VLLM_VERSION="0.19.1"
+VLLM_TOOL_CALL_PARSER="hermes"
+VLLM_LANGUAGE_MODEL_ONLY=0
 MAX_MODEL_LEN=""
 DATASET="terminal-bench@2.0"
 AGENT_IMPORT_PATH="VanilluxAgent:VanilluxAgent"
@@ -51,6 +53,7 @@ BEAKER_WORKSPACE="${BEAKER_WORKSPACE:-ai2/tmax}"
 BEAKER_IMAGE="hamishivi/hamishivi-interactive"
 REPO_GIT_URL=""
 REPO_GIT_REF=""
+BEAKER_SCRIPTS_DATASET=""
 
 usage() {
     cat <<EOF
@@ -68,6 +71,8 @@ Options:
   --dp N                 data-parallel-size (default: 1)
   --port PORT            vllm port (default: 8008)
   --vllm-version VER     vLLM package version for uvx (default: 0.19.1)
+  --tool-call-parser P   vLLM tool call parser (default: hermes)
+  --language-model-only  pass --language_model_only to vLLM
   --max-model-len LEN    pass --max-model-len to vllm
   --dataset DS           harbor dataset (default: terminal-bench@2.0; also
                          valid: openthoughts-tblite@2.0)
@@ -82,6 +87,9 @@ Options:
   --priority PRI         beaker priority (default: urgent)
   --workspace WS         beaker workspace (default: \$BEAKER_WORKSPACE or ai2/tmax)
   --image IMAGE          beaker image (default: $BEAKER_IMAGE)
+  --beaker-scripts-dataset DS
+                         existing Beaker dataset to mount at /uploaded-beaker-scripts
+                         (default: upload local scripts/beaker)
   --repo-url URL         git URL of tmax (default: current 'origin' remote)
   --repo-ref REF         git SHA/branch of tmax (default: current HEAD SHA)
 EOF
@@ -100,6 +108,8 @@ while [ $# -gt 0 ]; do
         --dp)              DP_SIZE="$2"; shift 2 ;;
         --port)            VLLM_PORT="$2"; shift 2 ;;
         --vllm-version)    VLLM_VERSION="$2"; shift 2 ;;
+        --tool-call-parser) VLLM_TOOL_CALL_PARSER="$2"; shift 2 ;;
+        --language-model-only|--language_model_only) VLLM_LANGUAGE_MODEL_ONLY=1; shift ;;
         --max-model-len)   MAX_MODEL_LEN="$2"; shift 2 ;;
         --dataset)         DATASET="$2"; shift 2 ;;
         --agent)           AGENT_IMPORT_PATH="$2"; shift 2 ;;
@@ -112,6 +122,7 @@ while [ $# -gt 0 ]; do
         --priority)        PRIORITY="$2"; shift 2 ;;
         --workspace)       BEAKER_WORKSPACE="$2"; shift 2 ;;
         --image)           BEAKER_IMAGE="$2"; shift 2 ;;
+        --beaker-scripts-dataset) BEAKER_SCRIPTS_DATASET="$2"; shift 2 ;;
         --repo-url)        REPO_GIT_URL="$2"; shift 2 ;;
         --repo-ref)        REPO_GIT_REF="$2"; shift 2 ;;
         -h|--help)         usage ;;
@@ -139,6 +150,8 @@ cat <<EOF
   Model:        ${MODEL_PATH}@${REVISION}
   Served name:  ${SERVED_MODEL_NAME}
   vLLM version: ${VLLM_VERSION}
+  Tool parser:  ${VLLM_TOOL_CALL_PARSER}
+  LM only:      ${VLLM_LANGUAGE_MODEL_ONLY}
   GPUs:         ${GPU_COUNT} (TP=${TP_SIZE}, DP=${DP_SIZE})
   Dataset:      ${DATASET}
   Agent:        ${AGENT_IMPORT_PATH}
@@ -169,13 +182,14 @@ GANTRY_CMD=(
     --priority "$PRIORITY"
     --beaker-image "$BEAKER_IMAGE"
     --weka "oe-adapt-default:/weka/oe-adapt-default"
-    --upload "$REPO_ROOT/scripts/beaker:/uploaded-beaker-scripts"
     --env-secret HF_TOKEN
     --env-secret "DOCKER_PAT=${DOCKER_PAT_SECRET:-hamishivi_DOCKER_PAT}"
     --env "MODEL_PATH=${MODEL_PATH}"
     --env "MODEL_REVISION=${REVISION}"
     --env "SERVED_MODEL_NAME=${SERVED_MODEL_NAME}"
     --env "VLLM_VERSION=${VLLM_VERSION}"
+    --env "VLLM_TOOL_CALL_PARSER=${VLLM_TOOL_CALL_PARSER}"
+    --env "VLLM_LANGUAGE_MODEL_ONLY=${VLLM_LANGUAGE_MODEL_ONLY}"
     --env "VLLM_PORT=${VLLM_PORT}"
     --env "TP_SIZE=${TP_SIZE}"
     --env "DP_SIZE=${DP_SIZE}"
@@ -191,6 +205,12 @@ GANTRY_CMD=(
     --propagate-failure
     --no-python
 )
+
+if [ -n "$BEAKER_SCRIPTS_DATASET" ]; then
+    GANTRY_CMD+=(--dataset "${BEAKER_SCRIPTS_DATASET}:/uploaded-beaker-scripts")
+else
+    GANTRY_CMD+=(--upload "$REPO_ROOT/scripts/beaker:/uploaded-beaker-scripts")
+fi
 
 if [ -n "$BUDGET" ]; then
     GANTRY_CMD+=(--budget "$BUDGET")

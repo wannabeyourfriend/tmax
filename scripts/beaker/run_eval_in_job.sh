@@ -8,6 +8,8 @@
 #   MODEL_REVISION           HF revision/branch (default: main)
 #   SERVED_MODEL_NAME        --served-model-name for vLLM (required)
 #   VLLM_VERSION             vLLM package version for uvx (default: 0.19.1)
+#   VLLM_TOOL_CALL_PARSER    vLLM tool parser (default: hermes)
+#   VLLM_LANGUAGE_MODEL_ONLY pass --language_model_only to vLLM when set to 1
 #   VLLM_PORT                port for vLLM (default: 8008)
 #   TP_SIZE                  --tensor-parallel-size (required)
 #   DP_SIZE                  --data-parallel-size (default: 1)
@@ -93,9 +95,6 @@ CONF
 grep -q '^root:' /etc/subuid 2>/dev/null || echo 'root:10000:65536' >> /etc/subuid
 grep -q '^root:' /etc/subgid 2>/dev/null || echo 'root:10000:65536' >> /etc/subgid
 
-# --- 3. Patch harbor's vendored compose + touch sites -----------------------
-# Re-applied on every run; sentinel checks make this idempotent. Required
-# because harbor is reinstalled fresh in each beaker container.
 log "running uv sync"
 if ! command -v uv >/dev/null 2>&1; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -237,6 +236,7 @@ fi
 
 # --- 5. Start vLLM in the background ----------------------------------------
 : "${VLLM_VERSION:=0.19.1}"
+: "${VLLM_TOOL_CALL_PARSER:=hermes}"
 : "${VLLM_PORT:=8008}"
 : "${DP_SIZE:=1}"
 VLLM_LOG=/tmp/vllm.log
@@ -246,13 +246,16 @@ VLLM_CMD=( uvx "vllm==${VLLM_VERSION}" serve "$MODEL_PATH"
            --tokenizer-revision "$MODEL_REVISION"
            --served-model-name "$SERVED_MODEL_NAME"
            --enable-auto-tool-choice
-           --tool-call-parser hermes
+           --tool-call-parser "$VLLM_TOOL_CALL_PARSER"
            --port "$VLLM_PORT"
            --gpu-memory-utilization 0.85
            --tensor-parallel-size "$TP_SIZE"
            --data-parallel-size "$DP_SIZE" )
 if [ -n "${MAX_MODEL_LEN:-}" ]; then
     VLLM_CMD+=( --max-model-len "$MAX_MODEL_LEN" )
+fi
+if [ "${VLLM_LANGUAGE_MODEL_ONLY:-0}" = "1" ]; then
+    VLLM_CMD+=( --language_model_only )
 fi
 
 log "launching vllm: ${VLLM_CMD[*]}"
@@ -326,11 +329,13 @@ except Exception:
     sys.exit(0)
 total = d.get("n_total_trials", "?")
 stats = d.get("stats", {}) or {}
-done = stats.get("n_trials", 0)
-errs = stats.get("n_errors", 0)
+done = stats.get("n_trials", stats.get("n_completed_trials", 0))
+errs = stats.get("n_errors", stats.get("n_errored_trials", 0))
 evals = stats.get("evals", {}) or {}
 mean = 0.0
 for v in evals.values():
+    done = max(done, v.get("n_trials", 0))
+    errs = max(errs, v.get("n_errors", 0))
     m = (v.get("metrics") or [{}])[0].get("mean")
     if m is not None:
         mean = m
