@@ -37,6 +37,7 @@ from preprocessing.filters import (
     apply_optional_filters,
     apply_warning_flags,
 )
+from preprocessing.harness import DEFAULT_HARNESS_NAME, HARNESSES, HarnessSpec, get_harness
 from preprocessing.report import print_report
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,11 @@ def _iter_source_subsets(
                 "pattern": sub.get("pattern"),
                 "source_label": label,
                 "conversations_column": conv_col,
+                # Pass-through sources expose extra hints (e.g. an explicit
+                # config name to pass to ``load_dataset``); forward them
+                # opaquely so we don't have to enumerate every type's
+                # bespoke keys here.
+                "passthrough_config": sub.get("passthrough_config"),
             })
     return items
 
@@ -138,6 +144,18 @@ def load_raw_dataset(item: dict, cache_dir: str | None = None) -> Dataset:
         ds = load_dataset(item["repo_id"], split="train", cache_dir=cache_dir)
         return ds
 
+    if item["type"] == "huggingface_passthrough":
+        # Sources whose parquet is *already* in the target SFT schema
+        # (messages + tools + source + metadata, vanillux-harness rows).
+        # ``passthrough_config`` is the HF dataset config name (a.k.a.
+        # subset) to load; we fall back to ``subset`` for the common case
+        # where they're equal.
+        config = item.get("passthrough_config") or item.get("subset")
+        ds = load_dataset(
+            item["repo_id"], name=config, split="train", cache_dir=cache_dir,
+        )
+        return ds
+
     # huggingface_parquet: custom loading for repos with large row groups
     hub_paths = _resolve_parquet_paths(item["repo_id"], item["pattern"])
     local_paths = _ensure_downloaded(item["repo_id"], hub_paths, cache_dir)
@@ -149,12 +167,18 @@ def load_raw_dataset(item: dict, cache_dir: str | None = None) -> Dataset:
 # Per-source processing
 # ======================================================================
 
-def _convert_fn(row: dict, source_label: str, conversations_column: str) -> dict:
+def _convert_fn(
+    row: dict,
+    source_label: str,
+    conversations_column: str,
+    harness: HarnessSpec,
+) -> dict:
     """Wrapper suitable for ``Dataset.map``."""
     return convert_trace(
         row,
         source_label=source_label,
         conversations_column=conversations_column,
+        harness=harness,
     )
 
 
@@ -194,6 +218,7 @@ def process_source(
     output_dir: Path,
     num_workers: int,
     max_turns: int,
+    harness: HarnessSpec,
     require_task_complete: bool = True,
     cache_dir: str | None = None,
     num_examples: int = 3,
@@ -230,6 +255,21 @@ def process_source(
 
         input_count = len(ds)
 
+    # Pass-through sources skip the entire convert+filter loop -- the rows
+    # are already in the target SFT schema (vanillux harness + tools).
+    # We still emit a stats stub so the aggregate report stays well-formed.
+    if item["type"] == "huggingface_passthrough":
+        return _process_passthrough(
+            ds=ds,
+            label=label,
+            safe_name=safe_name,
+            output_dir=output_dir,
+            harness=harness,
+            num_examples=num_examples,
+            input_count=input_count,
+            t0=t0,
+        )
+
     # 2+3. Convert + filter + partition + statistics in ONE pass.
     #
     # Profiling showed convert_trace itself takes <1 ms per row — the real
@@ -244,9 +284,11 @@ def process_source(
     logger.info("  Bulk-decoding %d rows from Arrow ...", input_count)
     raw_cols = {col: ds[col] for col in ds.column_names}
 
-    kept_data: dict[str, list] = {"messages": [], "source": [], "metadata": []}
+    kept_data: dict[str, list] = {
+        "messages": [], "tools": [], "source": [], "metadata": [],
+    }
     dropped_data: dict[str, list] = {
-        "messages": [], "source": [], "metadata": [],
+        "messages": [], "tools": [], "source": [], "metadata": [],
         "warnings": [], "_drop_reason": [],
     }
     _raw_conv_key = conv_col if conv_col not in dropped_data else None
@@ -265,10 +307,12 @@ def process_source(
         if item.get("format") == "sera":
             result = convert_sera_trace(
                 row, source_label=label, messages_column=conv_col,
+                harness=harness,
             )
         else:
             result = convert_trace(
                 row, source_label=label, conversations_column=conv_col,
+                harness=harness,
             )
 
         # ── mandatory filters ─────────────────────────────────────
@@ -277,6 +321,7 @@ def process_source(
         )
         if not mandatory.keep:
             dropped_data["messages"].append(result["messages"])
+            dropped_data["tools"].append(result.get("tools", harness.tools_json))
             dropped_data["source"].append(result["source"])
             dropped_data["metadata"].append(result["metadata"])
             dropped_data["warnings"].append(result["warnings"])
@@ -291,6 +336,7 @@ def process_source(
         optional = apply_optional_filters(result, max_turns=max_turns)
         if not optional.keep:
             dropped_data["messages"].append(result["messages"])
+            dropped_data["tools"].append(result.get("tools", harness.tools_json))
             dropped_data["source"].append(result["source"])
             dropped_data["metadata"].append(result["metadata"])
             dropped_data["warnings"].append(result["warnings"])
@@ -303,6 +349,7 @@ def process_source(
 
         # ── kept — collect row + statistics ────────────────────────
         kept_data["messages"].append(result["messages"])
+        kept_data["tools"].append(result.get("tools", harness.tools_json))
         kept_data["source"].append(result["source"])
         kept_data["metadata"].append(result["metadata"])
 
@@ -375,7 +422,7 @@ def process_source(
     out_path = output_dir / f"{safe_name}.parquet"
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    keep_cols = {"messages", "source", "metadata"}
+    keep_cols = {"messages", "tools", "source", "metadata"}
     drop_cols = [c for c in kept.column_names if c not in keep_cols]
     if drop_cols:
         kept = kept.remove_columns(drop_cols)
@@ -403,6 +450,92 @@ def process_source(
         label, input_count, len(kept), len(dropped), elapsed,
     )
     return stats, examples, dropped_examples
+
+
+# ======================================================================
+# Pass-through processing
+# ======================================================================
+
+
+def _process_passthrough(
+    *,
+    ds: Dataset,
+    label: str,
+    safe_name: str,
+    output_dir: Path,
+    harness: HarnessSpec,
+    num_examples: int,
+    input_count: int,
+    t0: float,
+) -> tuple[dict, list[dict], list[dict]]:
+    """Copy a pre-converted source through to the output dir verbatim.
+
+    The dataset must already be in the SFT target schema:
+    ``messages | tools | source | metadata``. We keep exactly those four
+    columns (dropping anything else like ``_success`` helpers), write the
+    parquet under the same naming convention as the regular path, and
+    emit a stats stub so ``conversion_report.json`` stays well-formed.
+
+    Drop reasons / warnings / turn-count distributions are NOT computed
+    here -- they're inherited from the upstream conversion that produced
+    this dataset (see ``conversion_report.json`` in the source repo's
+    `convert_trajectories.py` outputs).
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_path = output_dir / f"{safe_name}.parquet"
+
+    keep_cols = {"messages", "tools", "source", "metadata"}
+    drop_cols = [c for c in ds.column_names if c not in keep_cols]
+    if drop_cols:
+        ds = ds.remove_columns(drop_cols)
+    missing = keep_cols - set(ds.column_names)
+    if missing:
+        # ``tools`` is the column most likely to be missing on older
+        # pre-converted repos -- backfill it from the harness so the
+        # combined parquet keeps a single schema across all configs.
+        # Other missing columns are surfaced as warnings (downstream will
+        # likely fail at parquet write time if anything critical is gone).
+        if "tools" in missing:
+            ds = ds.add_column("tools", [harness.tools_json] * len(ds))
+            missing = missing - {"tools"}
+        if missing:
+            logger.warning(
+                "  passthrough %s missing columns %s -- proceeding anyway",
+                label, sorted(missing),
+            )
+
+    ds.to_parquet(str(out_path))
+
+    rng = random.Random(42)
+    examples: list[dict] = []
+    if len(ds) > 0 and num_examples > 0:
+        ex_indices = rng.sample(range(len(ds)), min(num_examples, len(ds)))
+        for idx in ex_indices:
+            row = ds[idx]
+            examples.append({
+                "source": row.get("source", label),
+                "messages": row.get("messages", []),
+                "metadata": row.get("metadata", {}),
+            })
+
+    elapsed = time.time() - t0
+    stats = {
+        "source_label": label,
+        "input_traces": input_count,
+        "output_traces": len(ds),
+        "dropped": 0,
+        "drop_reasons": {},
+        "json_strategy_distribution": {0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0},
+        "warning_counts": {},
+        "turn_stats": {},
+        "elapsed_seconds": round(elapsed, 1),
+        "passthrough": True,
+    }
+    logger.info(
+        "  %s (passthrough): copied %d rows in %.1fs",
+        label, len(ds), elapsed,
+    )
+    return stats, examples, []
 
 
 # ======================================================================
@@ -474,6 +607,7 @@ def run_pipeline(
     num_examples: int = 3,
     shard_index: int | None = None,
     num_shards: int | None = None,
+    harness: HarnessSpec | str | None = None,
 ) -> dict:
     """Run the full conversion pipeline.
 
@@ -501,6 +635,9 @@ def run_pipeline(
         When running distributed, which shard this worker handles (0-based).
     num_shards : int | None
         Total number of shards to split each source into.
+    harness : HarnessSpec | str | None
+        Which SFT harness frames every emitted row (default: vanillux).
+        Pass ``"tassie"`` for the legacy framing.
 
     Returns
     -------
@@ -513,6 +650,11 @@ def run_pipeline(
 
     if num_workers is None:
         num_workers = max(1, os.cpu_count() or 1)
+
+    if isinstance(harness, HarnessSpec):
+        harness_spec = harness
+    else:
+        harness_spec = get_harness(harness)
 
     registry = load_source_registry(
         Path(sources_yaml) if sources_yaml else None
@@ -530,8 +672,8 @@ def run_pipeline(
     )
     shard_desc = f", shard {shard_index}/{num_shards}" if num_shards else ""
     logger.info(
-        "Pipeline starting: %d source(s), %d workers, %s%s",
-        len(items), num_workers, sample_desc, shard_desc,
+        "Pipeline starting: %d source(s), %d workers, %s%s, harness=%s",
+        len(items), num_workers, sample_desc, shard_desc, harness_spec.name,
     )
 
     # Pre-fetch all source datasets concurrently (overlaps I/O)
@@ -551,6 +693,7 @@ def run_pipeline(
             output_dir=output_dir,
             num_workers=num_workers,
             max_turns=max_turns,
+            harness=harness_spec,
             require_task_complete=require_task_complete,
             cache_dir=cache_dir,
             num_examples=num_examples,
@@ -562,6 +705,7 @@ def run_pipeline(
 
     # Aggregate report
     report = _build_report(all_stats)
+    report["harness"] = harness_spec.name
     report_path = output_dir / "conversion_report.json"
     with open(report_path, "w") as f:
         json.dump(report, f, indent=2)
@@ -803,6 +947,19 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Path to the YAML source registry.",
     )
+    p.add_argument(
+        "--harness",
+        choices=sorted(HARNESSES),
+        default=DEFAULT_HARNESS_NAME,
+        help=(
+            "Which SFT harness frames every emitted row. "
+            "'vanillux' (default) matches Vanillux2Agent / vanillux_solver -- "
+            "short system prompt + mini-swe-agent instance template. "
+            "'tassie' reproduces the legacy tmax-sft-full-20260409 framing "
+            "(persistent-bash TassieAgent system prompt, bare task in user). "
+            "Both share the same single-bash tool spec."
+        ),
+    )
 
     shard_group = p.add_argument_group("sharding", "Distributed processing across jobs")
     shard_group.add_argument(
@@ -855,6 +1012,7 @@ def main() -> None:
         max_turns=args.max_turns,
         require_task_complete=not args.include_partial,
         cache_dir=args.cache_dir,
+        harness=args.harness,
         sources_yaml=args.sources_yaml,
         num_examples=args.num_examples,
         shard_index=args.shard_index,

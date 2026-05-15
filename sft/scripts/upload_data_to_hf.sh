@@ -115,12 +115,13 @@ def main():
         path_or_fileobj=readme.encode(),
     ))
 
-    report_path = input_dir / "conversion_report.json"
-    if report_path.exists():
-        operations.append(CommitOperationAdd(
-            path_in_repo="conversion_report.json",
-            path_or_fileobj=str(report_path),
-        ))
+    for report_name in ("conversion_report.json", "filter_report.json"):
+        report_path = input_dir / report_name
+        if report_path.exists():
+            operations.append(CommitOperationAdd(
+                path_in_repo=report_name,
+                path_or_fileobj=str(report_path),
+            ))
 
     print(f"\nUploading {len(parquet_files)} config(s) in a single commit ...")
     api.create_commit(

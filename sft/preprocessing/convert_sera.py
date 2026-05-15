@@ -24,16 +24,23 @@ import re
 from pathlib import Path
 
 from preprocessing.builders import SUBMIT_COMMAND
+from preprocessing.harness import HarnessSpec, get_harness
 
-_CONFIG_DIR = Path(__file__).resolve().parent / "config"
-_SYSTEM_PROMPT: str | None = None
+# Per the SFT parquet schema, every message struct must carry all five
+# keys; see ``preprocessing.convert._normalise_message`` for the canonical
+# version. Sera rows share the same parquet schema as Terminus-2 rows so
+# both converters MUST agree on this shape.
+_MESSAGE_KEYS = ("content", "reasoning_content", "role", "tool_call_ids", "tool_calls")
 
 
-def _get_system_prompt() -> str:
-    global _SYSTEM_PROMPT
-    if _SYSTEM_PROMPT is None:
-        _SYSTEM_PROMPT = (_CONFIG_DIR / "system_prompt.txt").read_text().strip()
-    return _SYSTEM_PROMPT
+def _normalise_message(msg: dict) -> dict:
+    return {
+        "content": msg.get("content", "") or "",
+        "reasoning_content": msg.get("reasoning_content", "") or "",
+        "role": msg.get("role", ""),
+        "tool_call_ids": list(msg.get("tool_call_ids") or []),
+        "tool_calls": list(msg.get("tool_calls") or []),
+    }
 
 
 def _deterministic_id(conversation_id: str, suffix: str) -> str:
@@ -148,6 +155,7 @@ def convert_sera_trace(
     *,
     source_label: str = "",
     messages_column: str = "messages",
+    harness: HarnessSpec | None = None,
 ) -> dict:
     """Convert a single SERA trace into our bash-only SWE-agent format.
 
@@ -160,12 +168,20 @@ def convert_sera_trace(
         Value for the ``source`` output column.
     messages_column : str
         Column holding the raw conversation (default ``"messages"``).
+    harness : HarnessSpec | None
+        Which harness frames the row (default: vanillux). Sera's tasks
+        are SWE-bench-style issue descriptions; ``harness.render_instance``
+        wraps them in the harness's instance template (a no-op for tassie,
+        the full mini-swe-agent template for vanillux).
 
     Returns
     -------
-    dict with keys ``messages``, ``source``, ``metadata``, ``warnings``,
-    ``_conversion_ok`` — same shape as :func:`convert.convert_trace`.
+    dict with keys ``messages``, ``tools``, ``source``, ``metadata``,
+    ``warnings``, ``_conversion_ok`` — same shape as
+    :func:`convert.convert_trace`.
     """
+    if harness is None:
+        harness = get_harness()
     conversation_id = row.get("instance_id", "unknown")
     warnings: list[str] = []
 
@@ -177,22 +193,22 @@ def convert_sera_trace(
         try:
             messages = json.loads(raw)
         except (json.JSONDecodeError, TypeError) as exc:
-            return _failure(source_label, conversation_id,
+            return _failure(source_label, conversation_id, harness,
                             f"JSON parse failed: {exc}")
     elif isinstance(raw, list):
         messages = raw
     else:
-        return _failure(source_label, conversation_id,
+        return _failure(source_label, conversation_id, harness,
                         "messages column is neither str nor list")
 
     if not messages:
-        return _failure(source_label, conversation_id, "Empty messages list")
+        return _failure(source_label, conversation_id, harness, "Empty messages list")
 
     # ------------------------------------------------------------------
-    # 1. System prompt (replace SERA's with ours)
+    # 1. System prompt (replace SERA's with the harness-supplied one)
     # ------------------------------------------------------------------
     converted: list[dict] = [
-        {"role": "system", "content": _get_system_prompt()},
+        _normalise_message({"role": "system", "content": harness.system_prompt}),
     ]
 
     i = 0
@@ -200,14 +216,17 @@ def convert_sera_trace(
         i = 1
 
     # ------------------------------------------------------------------
-    # 2. First user message
+    # 2. First user message (wrapped in the harness's instance template)
     # ------------------------------------------------------------------
     if i >= len(messages) or messages[i].get("role") != "user":
-        return _failure(source_label, conversation_id,
+        return _failure(source_label, conversation_id, harness,
                         "No user message found after system prompt")
 
     user_content = _flatten_content(messages[i].get("content", ""))
-    converted.append({"role": "user", "content": user_content})
+    converted.append(_normalise_message({
+        "role": "user",
+        "content": harness.render_instance(user_content),
+    }))
     i += 1
 
     # ------------------------------------------------------------------
@@ -306,7 +325,7 @@ def convert_sera_trace(
                 assistant_msg["reasoning_content"] = thought
             if new_tool_calls:
                 assistant_msg["tool_calls"] = new_tool_calls
-            converted.append(assistant_msg)
+            converted.append(_normalise_message(assistant_msg))
 
             turn_index += 1
 
@@ -322,11 +341,11 @@ def convert_sera_trace(
             old_ids = msg.get("tool_call_ids") or []
             new_ids = [id_remap.get(oid, oid) for oid in old_ids]
 
-            converted.append({
+            converted.append(_normalise_message({
                 "role": "tool",
                 "content": tool_content,
                 "tool_call_ids": new_ids,
-            })
+            }))
             i += 1
 
         else:
@@ -352,6 +371,7 @@ def convert_sera_trace(
 
     return {
         "messages": converted,
+        "tools": harness.tools_json,
         "source": source_label,
         "metadata": metadata,
         "warnings": warnings,
@@ -359,9 +379,15 @@ def convert_sera_trace(
     }
 
 
-def _failure(source_label: str, conversation_id: str, reason: str) -> dict:
+def _failure(
+    source_label: str,
+    conversation_id: str,
+    harness: HarnessSpec,
+    reason: str,
+) -> dict:
     return {
         "messages": [],
+        "tools": harness.tools_json,
         "source": source_label,
         "metadata": {"instance_id": conversation_id},
         "warnings": [reason],

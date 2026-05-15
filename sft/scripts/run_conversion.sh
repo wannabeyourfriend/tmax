@@ -4,22 +4,34 @@ cd "$(dirname "$0")/.."
 
 # ── Full conversion pipeline ─────────────────────────────────────────
 #
-# Converts ALL Terminus-2 traces into SWE-agent format for SFT training.
-# Sources are defined in preprocessing/config/sources.yaml.
+# Converts every registered source (Terminus-2 traces, the Sera SWE-agent
+# corpus, plus the m-a-p/TerminalTraj traces) into SFT parquets and
+# pass-throughs the already-vanillux-formatted skill_tax_..._thinking_all
+# subset. Sources are defined in preprocessing/config/sources.yaml.
+#
+# Defaults to the Vanillux2Agent harness (short system + mini-swe-agent
+# instance template + single-bash tool spec). Use `--harness tassie` to
+# reproduce the legacy tmax-sft-full-20260409 framing byte-for-byte
+# (TassieAgent persistent-bash system prompt, bare task in user, same
+# tools spec). Both harnesses write the same row schema:
+#   messages | tools | source | metadata
 #
 # Usage:
 #   bash scripts/run_conversion.sh
-#   bash scripts/run_conversion.sh --upload              # also push to HF
-#   bash scripts/run_conversion.sh --upload --public     # push as public
-#   bash scripts/run_conversion.sh --include-partial     # keep truncated traces
+#   bash scripts/run_conversion.sh --upload                # also push to HF
+#   bash scripts/run_conversion.sh --upload --public       # push as public
+#   bash scripts/run_conversion.sh --include-partial       # keep truncated traces
+#   bash scripts/run_conversion.sh --harness tassie \
+#       --repo osieosie/tmax-sft-full-tassie-20260513      # legacy re-build
 #
-# Output: output/preprocessing/terminus2_sweagent/
+# Output: output/preprocessing/terminus2_vanillux_full_20260513/
 
 NUM_WORKERS="$(nproc)"
-OUTPUT_DIR="output/preprocessing/terminus2_sweagent_full_20260409"
+OUTPUT_DIR="${OUTPUT_DIR:-output/preprocessing/terminus2_vanillux_full_20260513}"
 MAX_TURNS=999
 NUM_EXAMPLES=3
-HF_REPO="osieosie/tmax-sft-full-20260409"
+HF_REPO="${HF_REPO:-osieosie/tmax-sft-full-20260513}"
+HARNESS="${HARNESS:-vanillux}"
 UPLOAD=true
 UPLOAD_FLAGS=""
 INCLUDE_PARTIAL=false
@@ -31,6 +43,8 @@ while [[ $# -gt 0 ]]; do
         --upload)            UPLOAD=true; shift ;;
         --public)            UPLOAD_FLAGS="${UPLOAD_FLAGS} --public"; shift ;;
         --repo)              HF_REPO="$2"; shift 2 ;;
+        --output-dir)        OUTPUT_DIR="$2"; shift 2 ;;
+        --harness)           HARNESS="$2"; shift 2 ;;
         --include-partial)   INCLUDE_PARTIAL=true; shift ;;
         *)                   PIPELINE_EXTRA="${PIPELINE_EXTRA} $1"; shift ;;
     esac
@@ -41,12 +55,13 @@ if [ "${INCLUDE_PARTIAL}" = true ]; then
     PARTIAL_FLAG="--include-partial"
 fi
 
-echo "=== Terminus-2 -> SWE-Agent Full Conversion Pipeline ==="
+echo "=== Conversion pipeline (${HARNESS} harness) ==="
 echo "  Workers:    ${NUM_WORKERS}"
 echo "  Output:     ${OUTPUT_DIR}"
 echo "  Max turns:  ${MAX_TURNS}"
 echo "  Examples:   ${NUM_EXAMPLES} per source"
 echo "  Partial:    ${INCLUDE_PARTIAL}"
+echo "  HF repo:    ${HF_REPO}"
 echo ""
 
 # shellcheck disable=SC2086
@@ -55,6 +70,7 @@ python -m preprocessing.pipeline \
     --output-dir "${OUTPUT_DIR}" \
     --max-turns "${MAX_TURNS}" \
     --num-examples "${NUM_EXAMPLES}" \
+    --harness "${HARNESS}" \
     ${PARTIAL_FLAG} \
     ${PIPELINE_EXTRA}
 

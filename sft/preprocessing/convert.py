@@ -1,8 +1,11 @@
-"""Core trace conversion: Terminus-2 → SWE-agent format.
+"""Core trace conversion: Terminus-2 -> SWE-agent format.
 
 The public entry point is :func:`convert_trace`, designed to be used with
-``datasets.Dataset.map``.  It is pure (no I/O, no global mutation) aside from
-reading the replacement system prompt once at module load.
+``datasets.Dataset.map``.  It is pure (no I/O, no global mutation): the
+caller passes in a :class:`HarnessSpec` (see :mod:`preprocessing.harness`)
+that supplies the system prompt, the instance-template wrapper, and the
+``tools`` JSON for each row, so the same converter can emit either the
+vanillux (default) or legacy tassie framing.
 """
 
 from __future__ import annotations
@@ -19,20 +22,20 @@ from preprocessing.builders import (
     build_tool_result,
     is_harness_error,
 )
+from preprocessing.harness import HarnessSpec, get_harness
 
 _CONFIG_DIR = Path(__file__).resolve().parent / "config"
-_SYSTEM_PROMPT: str | None = None
 _TOOL_SCHEMAS: list[dict] | None = None
 
 TASK_DELIM = "Task Description:\n"
 STATE_DELIM = "Current terminal state:\n"
 
-
-def _get_system_prompt() -> str:
-    global _SYSTEM_PROMPT
-    if _SYSTEM_PROMPT is None:
-        _SYSTEM_PROMPT = (_CONFIG_DIR / "system_prompt.txt").read_text().strip()
-    return _SYSTEM_PROMPT
+# Per the SFT parquet schema (matches tmax-sft-skill-tax-... rows produced
+# by convert_trajectories._normalise_message), every message struct must
+# carry all five keys -- HF Datasets infers a single struct type across
+# rows from the first row, so a missing key on row N would surface as a
+# silent column-drop. We zero-fill optional fields here.
+_MESSAGE_KEYS = ("content", "reasoning_content", "role", "tool_call_ids", "tool_calls")
 
 
 def get_tool_schemas() -> list[dict]:
@@ -42,11 +45,30 @@ def get_tool_schemas() -> list[dict]:
     return _TOOL_SCHEMAS
 
 
+def _normalise_message(msg: dict) -> dict:
+    """Coerce a partial message dict to the 5-key parquet schema.
+
+    Mirrors ``convert_trajectories._normalise_message`` so SFT rows from
+    the Terminus-2 converter and the rl_data-trajectory converter share
+    one Arrow schema (critical for the combined HF dataset upload to
+    keep a single struct type per config).
+    """
+    out: dict = {
+        "content": msg.get("content", "") or "",
+        "reasoning_content": msg.get("reasoning_content", "") or "",
+        "role": msg.get("role", ""),
+        "tool_call_ids": list(msg.get("tool_call_ids") or []),
+        "tool_calls": list(msg.get("tool_calls") or []),
+    }
+    return out
+
+
 def convert_trace(
     row: dict,
     *,
     source_label: str = "",
     conversations_column: str = "conversations",
+    harness: HarnessSpec | None = None,
 ) -> dict:
     """Convert a single Terminus-2 trace into SWE-agent format.
 
@@ -59,12 +81,18 @@ def convert_trace(
         ``"nvidia/Nemotron-Terminal-Corpus/skill_based_easy"``).
     conversations_column : str
         Name of the column holding the raw conversation list.
+    harness : HarnessSpec | None
+        Which harness frames the output row (default: vanillux). Controls
+        the system prompt, the user-side instance wrapping, and the
+        emitted ``tools`` JSON.
 
     Returns
     -------
-    dict with keys ``messages``, ``source``, ``metadata``, ``warnings``,
-    ``_conversion_ok``.
+    dict with keys ``messages``, ``tools``, ``source``, ``metadata``,
+    ``warnings``, ``_conversion_ok``.
     """
+    if harness is None:
+        harness = get_harness()
     messages = row.get(conversations_column, [])
     conversation_id = row.get("trial_name", "unknown")
     warnings: list[str] = []
@@ -74,7 +102,7 @@ def convert_trace(
     # ------------------------------------------------------------------
     if not messages or messages[0].get("role") != "user":
         return _failure(
-            source_label, conversation_id,
+            source_label, conversation_id, harness,
             "Invalid trace: does not start with user message",
         )
 
@@ -84,7 +112,7 @@ def convert_trace(
     content0 = messages[0]["content"]
 
     if TASK_DELIM in content0:
-        remainder = content0[content0.index(TASK_DELIM):]
+        remainder = content0[content0.index(TASK_DELIM) + len(TASK_DELIM):]
     else:
         remainder = content0
         warnings.append("TASK_DELIM not found in message 0; using full content as task")
@@ -96,12 +124,15 @@ def convert_trace(
         warnings.append("STATE_DELIM not found in message 0")
 
     # ------------------------------------------------------------------
-    # 2. Emit system + first user message
+    # 2. Emit system + first user message (instance-wrapped per harness)
     # ------------------------------------------------------------------
     converted: list[dict] = [
-        {"role": "system", "content": _get_system_prompt()},
+        _normalise_message({"role": "system", "content": harness.system_prompt}),
+        _normalise_message({
+            "role": "user",
+            "content": harness.render_instance(task_description),
+        }),
     ]
-    converted.append({"role": "user", "content": task_description})
 
     # ------------------------------------------------------------------
     # 3. Walk (assistant, user) pairs
@@ -131,7 +162,9 @@ def convert_trace(
         if parsed is None:
             json_failed = True
             warnings.append(f"JSON extraction failed at index {i}")
-            converted.append({"role": "assistant", "content": msg["content"]})
+            converted.append(_normalise_message({
+                "role": "assistant", "content": msg["content"],
+            }))
             i += 1
             turn_index += 1
             continue
@@ -205,7 +238,7 @@ def convert_trace(
             submit_msgs = build_submit_messages(
                 parsed, conversation_id, turn_index, reasoning,
             )
-            converted.extend(submit_msgs)
+            converted.extend(_normalise_message(m) for m in submit_msgs)
             turn_index += 1
             break
 
@@ -228,10 +261,10 @@ def convert_trace(
             assistant_msg["reasoning_content"] = reasoning
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
-        converted.append(assistant_msg)
+        converted.append(_normalise_message(assistant_msg))
 
         if tool_result is not None:
-            converted.append(tool_result)
+            converted.append(_normalise_message(tool_result))
 
         turn_index += 1
 
@@ -256,6 +289,7 @@ def convert_trace(
 
     return {
         "messages": converted,
+        "tools": harness.tools_json,
         "source": source_label,
         "metadata": metadata,
         "warnings": warnings,
@@ -263,9 +297,15 @@ def convert_trace(
     }
 
 
-def _failure(source_label: str, conversation_id: str, reason: str) -> dict:
+def _failure(
+    source_label: str,
+    conversation_id: str,
+    harness: HarnessSpec,
+    reason: str,
+) -> dict:
     return {
         "messages": [],
+        "tools": harness.tools_json,
         "source": source_label,
         "metadata": {"trial_name": conversation_id},
         "warnings": [reason],
