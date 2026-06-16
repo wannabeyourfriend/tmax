@@ -9,18 +9,18 @@
 
 set -euo pipefail
 
-# ---- Parameters (edit here) ----
-TASKS_DIR="rl_data/output/tasks_skill_tax_20260327_toy"
-MODEL="gemini/gemini-3-flash-preview" #gemini-3-flash-preview, gemini-3.1-flash-lite-preview, "gemini/gemini-3.1-pro-preview"
-NUM_SOLUTIONS=8
-MAX_ACTIONS=16 # max turns
-MAX_TOKENS=65536
-NUM_TASKS=10
-START_AT=0
-WORKERS=10                   # parallel tasks (each runs NUM_SOLUTIONS agent loops)
-NUM_POOL_WORKERS=128        # parallel LLM calls within each turn
-SOLUTION_TEMPERATURE=0.7
-COMMAND_TIMEOUT=600         # per-command timeout in seconds inside containers
+# ---- Parameters (edit here or override via env) ----
+TASKS_DIR="${TASKS_DIR:-rl_data/output/tasks_skill_tax_20260327_toy}"
+MODEL="${MODEL:-gemini/gemini-3-flash-preview}" #gemini-3-flash-preview, gemini-3.1-flash-lite-preview, "gemini/gemini-3.1-pro-preview"
+NUM_SOLUTIONS="${NUM_SOLUTIONS:-8}"
+MAX_ACTIONS="${MAX_ACTIONS:-16}" # max turns
+MAX_TOKENS="${MAX_TOKENS:-65536}"
+NUM_TASKS="${NUM_TASKS:-10}"
+START_AT="${START_AT:-0}"
+WORKERS="${WORKERS:-10}"                   # parallel tasks (each runs NUM_SOLUTIONS agent loops)
+NUM_POOL_WORKERS="${NUM_POOL_WORKERS:-128}"        # parallel LLM calls within each turn
+SOLUTION_TEMPERATURE="${SOLUTION_TEMPERATURE:-0.7}"
+COMMAND_TIMEOUT="${COMMAND_TIMEOUT:-600}"         # per-command timeout in seconds inside containers
                             # (was 30 — too aggressive once v2 corpus tasks
                             # with apt/pip-heavy setup.sh joined the mix)
 # First shell prompt: under WORKERS×NUM_SOLUTIONS concurrent Apptainers, raise if you see "Shell init timed out"

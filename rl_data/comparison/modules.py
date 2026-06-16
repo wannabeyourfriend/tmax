@@ -990,6 +990,9 @@ def module_composition(ctx: RunContext) -> Dict[str, Any]:
         stacked_style=default_stacked_style(
             title="Domain composition",
             palette_name=palette_name,
+            # Squash the bar height ~20% (6.5 -> 5.2) for a wider, less "tall"
+            # aspect ratio; width is unchanged.
+            figsize=(11.0, 5.2),
         ),
         appendix_base=ctx.appendix_dir / "composition_domain_bar",
         ridgeline_title="Domain composition (ridgeline)",
