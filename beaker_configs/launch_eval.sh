@@ -62,6 +62,16 @@ EXTRA_UV_PIP_INSTALLS=""
 EXTRA_AGENT_KWARGS=""
 EXTRA_AGENT_ENVS=""
 HOSTED_VLLM_MODEL_INFO=""
+HARBOR_OVERRIDE_CPUS=""
+HARBOR_OVERRIDE_MEMORY_MB=""
+HARBOR_OVERRIDE_STORAGE_MB=""
+HARBOR_OVERRIDE_GPUS=""
+HARBOR_TIMEOUT_MULTIPLIER=""
+HARBOR_AGENT_TIMEOUT_MULTIPLIER=""
+HARBOR_VERIFIER_TIMEOUT_MULTIPLIER=""
+HARBOR_AGENT_SETUP_TIMEOUT_MULTIPLIER=""
+HARBOR_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER=""
+HARBOR_AGENT_TIMEOUT_SEC=""
 
 usage() {
     cat <<EOF
@@ -111,6 +121,22 @@ Options:
   --agent-env KV         extra harbor --agent-env value (can be repeated)
   --hosted-vllm-model-info JSON
                         Harbor model_info JSON for hosted_vllm agents
+  --override-cpus N      harbor per-task environment CPU override
+  --override-memory-mb N harbor per-task environment memory override in MB
+  --override-storage-mb N
+                        harbor per-task environment storage override in MB
+  --override-gpus N      harbor per-task environment GPU override
+  --timeout-multiplier X harbor task timeout multiplier
+  --agent-timeout-multiplier X
+                        harbor agent timeout multiplier
+  --verifier-timeout-multiplier X
+                        harbor verifier timeout multiplier
+  --agent-setup-timeout-multiplier X
+                        harbor agent setup timeout multiplier
+  --environment-build-timeout-multiplier X
+                        harbor environment build timeout multiplier
+  --agent-timeout-sec SEC
+                        exact harbor agent timeout override in seconds
 EOF
     exit 1
 }
@@ -152,6 +178,16 @@ while [ $# -gt 0 ]; do
         --agent-kwarg)     EXTRA_AGENT_KWARGS+="${EXTRA_AGENT_KWARGS:+$'\n'}$2"; shift 2 ;;
         --agent-env)       EXTRA_AGENT_ENVS+="${EXTRA_AGENT_ENVS:+$'\n'}$2"; shift 2 ;;
         --hosted-vllm-model-info) HOSTED_VLLM_MODEL_INFO="$2"; shift 2 ;;
+        --override-cpus)   HARBOR_OVERRIDE_CPUS="$2"; shift 2 ;;
+        --override-memory-mb) HARBOR_OVERRIDE_MEMORY_MB="$2"; shift 2 ;;
+        --override-storage-mb) HARBOR_OVERRIDE_STORAGE_MB="$2"; shift 2 ;;
+        --override-gpus)   HARBOR_OVERRIDE_GPUS="$2"; shift 2 ;;
+        --timeout-multiplier) HARBOR_TIMEOUT_MULTIPLIER="$2"; shift 2 ;;
+        --agent-timeout-multiplier) HARBOR_AGENT_TIMEOUT_MULTIPLIER="$2"; shift 2 ;;
+        --verifier-timeout-multiplier) HARBOR_VERIFIER_TIMEOUT_MULTIPLIER="$2"; shift 2 ;;
+        --agent-setup-timeout-multiplier) HARBOR_AGENT_SETUP_TIMEOUT_MULTIPLIER="$2"; shift 2 ;;
+        --environment-build-timeout-multiplier) HARBOR_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER="$2"; shift 2 ;;
+        --agent-timeout-sec) HARBOR_AGENT_TIMEOUT_SEC="$2"; shift 2 ;;
         -h|--help)         usage ;;
         *) echo "unknown option: $1"; usage ;;
     esac
@@ -188,6 +224,8 @@ cat <<EOF
   Agent envs:   ${EXTRA_AGENT_ENVS:-<none>}
   Extra pip:    ${EXTRA_UV_PIP_INSTALLS:-<none>}
   N tasks:      ${N_TASKS:-<all>}
+  Task resources: cpus=${HARBOR_OVERRIDE_CPUS:-<task default>} memory_mb=${HARBOR_OVERRIDE_MEMORY_MB:-<task default>} storage_mb=${HARBOR_OVERRIDE_STORAGE_MB:-<task default>} gpus=${HARBOR_OVERRIDE_GPUS:-<task default>}
+  Timeouts:     agent_sec=${HARBOR_AGENT_TIMEOUT_SEC:-<task default>} timeout_mult=${HARBOR_TIMEOUT_MULTIPLIER:-<default>} agent_mult=${HARBOR_AGENT_TIMEOUT_MULTIPLIER:-<default>} verifier_mult=${HARBOR_VERIFIER_TIMEOUT_MULTIPLIER:-<default>}
   Model info:   ${HOSTED_VLLM_MODEL_INFO:-<auto>}
   Job name:     ${JOB_NAME}
   Results dir:  ${RESULTS_DIR}
@@ -240,6 +278,16 @@ GANTRY_CMD=(
     --env "N_CONCURRENT=${N_CONCURRENT}"
     --env "N_ATTEMPTS=${N_ATTEMPTS}"
     --env "N_TASKS=${N_TASKS}"
+    --env "HARBOR_OVERRIDE_CPUS=${HARBOR_OVERRIDE_CPUS}"
+    --env "HARBOR_OVERRIDE_MEMORY_MB=${HARBOR_OVERRIDE_MEMORY_MB}"
+    --env "HARBOR_OVERRIDE_STORAGE_MB=${HARBOR_OVERRIDE_STORAGE_MB}"
+    --env "HARBOR_OVERRIDE_GPUS=${HARBOR_OVERRIDE_GPUS}"
+    --env "HARBOR_TIMEOUT_MULTIPLIER=${HARBOR_TIMEOUT_MULTIPLIER}"
+    --env "HARBOR_AGENT_TIMEOUT_MULTIPLIER=${HARBOR_AGENT_TIMEOUT_MULTIPLIER}"
+    --env "HARBOR_VERIFIER_TIMEOUT_MULTIPLIER=${HARBOR_VERIFIER_TIMEOUT_MULTIPLIER}"
+    --env "HARBOR_AGENT_SETUP_TIMEOUT_MULTIPLIER=${HARBOR_AGENT_SETUP_TIMEOUT_MULTIPLIER}"
+    --env "HARBOR_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER=${HARBOR_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER}"
+    --env "HARBOR_AGENT_TIMEOUT_SEC=${HARBOR_AGENT_TIMEOUT_SEC}"
     --env "JOB_NAME=${JOB_NAME}"
     --env BEAKER_ALLOW_SUBCONTAINERS=1
     --env BEAKER_SKIP_DOCKER_SOCKET=1

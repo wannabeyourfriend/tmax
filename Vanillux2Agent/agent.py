@@ -79,6 +79,7 @@ class Vanillux2Agent(BaseAgent):
         max_steps: int = 64,
         temperature: float = 0.7,
         top_p: float | None = 0.95,
+        top_k: int | None = None,
         max_tokens: int = 16384,
         cost_limit: float = 0.0,
         api_base: str | None = None,
@@ -91,6 +92,7 @@ class Vanillux2Agent(BaseAgent):
         self.max_steps = max_steps
         self.temperature = temperature
         self.top_p = top_p
+        self.top_k = top_k
         self.max_tokens = max_tokens
         self.cost_limit = cost_limit
         self.api_base = api_base
@@ -258,6 +260,8 @@ class Vanillux2Agent(BaseAgent):
                     model.startswith("anthropic/") and self.temperature is not None
                 ):
                     completion_kwargs["top_p"] = self.top_p
+                if self.top_k is not None:
+                    completion_kwargs.setdefault("extra_body", {})["top_k"] = self.top_k
                 return await asyncio.wait_for(
                     asyncio.to_thread(
                         litellm.completion,

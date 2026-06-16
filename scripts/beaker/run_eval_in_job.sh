@@ -25,6 +25,15 @@
 #   N_CONCURRENT             default 8
 #   N_ATTEMPTS               default 1
 #   N_TASKS                  optional harbor --n-tasks limit
+#   HARBOR_OVERRIDE_CPUS     optional per-task environment CPU override
+#   HARBOR_OVERRIDE_MEMORY_MB
+#                            optional per-task environment memory override
+#   HARBOR_OVERRIDE_STORAGE_MB
+#                            optional per-task environment storage override
+#   HARBOR_OVERRIDE_GPUS     optional per-task environment GPU override
+#   HARBOR_*_TIMEOUT_MULTIPLIER
+#                            optional Harbor timeout multiplier flags
+#   HARBOR_AGENT_TIMEOUT_SEC optional exact per-task agent timeout override
 #   JOB_NAME                 harbor job name
 #   RESULTS_DIR              /weka path to copy jobs/$JOB_NAME into
 #   REPO_GIT_URL, REPO_GIT_REF
@@ -203,6 +212,23 @@ if '["down", "--rmi", "all", "--volumes", "--remove-orphans"]' in text:
     )
     docker_py.write_text(text)
     print("patched docker.py: dropped --rmi all from compose down")
+
+# Harbor's CLI exposes timeout multipliers but not the exact
+# AgentConfig.override_timeout_sec field. Let launch_eval set
+# HARBOR_AGENT_TIMEOUT_SEC for evals that need a uniform wall-clock cap.
+jobs_py = hdir / "cli/jobs.py"
+text = jobs_py.read_text()
+if "HARBOR_AGENT_TIMEOUT_SEC" not in text:
+    text = text.replace(
+        "    if environment_type is not None:\n",
+        "    harbor_agent_timeout_sec = __import__(\"os\").environ.get(\"HARBOR_AGENT_TIMEOUT_SEC\")\n"
+        "    if harbor_agent_timeout_sec:\n"
+        "        for agent in config.agents:\n"
+        "            agent.override_timeout_sec = float(harbor_agent_timeout_sec)\n\n"
+        "    if environment_type is not None:\n",
+    )
+    jobs_py.write_text(text)
+    print("patched jobs.py: added HARBOR_AGENT_TIMEOUT_SEC override")
 
 # Let launch_eval pass Mini SWE config overrides without replacing the entire
 # mini-swe-agent YAML. Passing a bare config_file with only agent.step_limit
@@ -466,6 +492,33 @@ HARBOR_CMD=( uv run harbor run
              -k "$N_ATTEMPTS" )
 if [ -n "${N_TASKS:-}" ]; then
     HARBOR_CMD+=( --n-tasks "$N_TASKS" )
+fi
+if [ -n "${HARBOR_OVERRIDE_CPUS:-}" ]; then
+    HARBOR_CMD+=( --override-cpus "$HARBOR_OVERRIDE_CPUS" )
+fi
+if [ -n "${HARBOR_OVERRIDE_MEMORY_MB:-}" ]; then
+    HARBOR_CMD+=( --override-memory-mb "$HARBOR_OVERRIDE_MEMORY_MB" )
+fi
+if [ -n "${HARBOR_OVERRIDE_STORAGE_MB:-}" ]; then
+    HARBOR_CMD+=( --override-storage-mb "$HARBOR_OVERRIDE_STORAGE_MB" )
+fi
+if [ -n "${HARBOR_OVERRIDE_GPUS:-}" ]; then
+    HARBOR_CMD+=( --override-gpus "$HARBOR_OVERRIDE_GPUS" )
+fi
+if [ -n "${HARBOR_TIMEOUT_MULTIPLIER:-}" ]; then
+    HARBOR_CMD+=( --timeout-multiplier "$HARBOR_TIMEOUT_MULTIPLIER" )
+fi
+if [ -n "${HARBOR_AGENT_TIMEOUT_MULTIPLIER:-}" ]; then
+    HARBOR_CMD+=( --agent-timeout-multiplier "$HARBOR_AGENT_TIMEOUT_MULTIPLIER" )
+fi
+if [ -n "${HARBOR_VERIFIER_TIMEOUT_MULTIPLIER:-}" ]; then
+    HARBOR_CMD+=( --verifier-timeout-multiplier "$HARBOR_VERIFIER_TIMEOUT_MULTIPLIER" )
+fi
+if [ -n "${HARBOR_AGENT_SETUP_TIMEOUT_MULTIPLIER:-}" ]; then
+    HARBOR_CMD+=( --agent-setup-timeout-multiplier "$HARBOR_AGENT_SETUP_TIMEOUT_MULTIPLIER" )
+fi
+if [ -n "${HARBOR_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER:-}" ]; then
+    HARBOR_CMD+=( --environment-build-timeout-multiplier "$HARBOR_ENVIRONMENT_BUILD_TIMEOUT_MULTIPLIER" )
 fi
 if [[ "$HARBOR_MODEL_NAME" == hosted_vllm/* ]]; then
     HARBOR_CMD+=( --agent-kwarg "model_info=$HOSTED_VLLM_MODEL_INFO" )
