@@ -4,7 +4,7 @@ These are the training launch scripts for the tmax fork (Qwen 3.5 + terminal age
 
 I recommend starting with the 1 GPU RL debug script (`qwen35_2b_1gpu.sh`), and then scaling up to the full-size scripts.
 
-**important**: For people at ai2, you should run in beaker session with `BEAKER_ALLOW_SUBCONTAINERS=1` and `BEAKER_SKIP_DOCKER_SOCKET=1` set to avoid using beaker's own docker instance, which is not allowed.
+**important**: For people at ai2, you should run in beaker session with `BEAKER_ALLOW_SUBCONTAINERS=1` and `BEAKER_SKIP_DOCKER_SOCKET=1` set to avoid using beaker's own docker instance, which is not allowed. For podman to work, you should also use an image with ubuntu 24.04 or newer. You also might need to run `unset LD_LIBRARY_PATH` to avoid conflicts with the system libraries when running stuff in interactives.
 
 ### Podman setup
 
@@ -15,13 +15,7 @@ If you already have podman and crun installed, you can skip this step.
 bash scripts/docker/setup_podman.sh
 ```
 
-This will install podman and crun in the image. Then start the podman service by running the following command:
-```bash
-podman system service --time=0 unix:///tmp/podman.sock
-```
-
-
-
+This script is made for Ai2 machines, so you may need to modify it to work on your own infrastructure.
 
 ## Scripts here
 
@@ -45,6 +39,7 @@ Scripts are split into two folders by training stage:
 | `qwen35_4b.sh` | DPPO RL on Qwen3.5-4B with `swerl-tmax-15k` |
 | `qwen35_9b.sh` | DPPO RL on Qwen3.5-9B with `swerl-tmax-15k` |
 | `qwen36_27b.sh` | DPPO RL on Qwen3.6-27B with `swerl-tmax-15k` |
+| `qwen3_8b.sh` | DPPO RL on Qwen3-8B (SFTed version) with `swerl-tmax-15k` |
 
 The RL scripts mostly share the same args; the per-size differences are model name,
 node/engine counts, rollout shape, and a few memory/perf flags (e.g. the 27b adds

@@ -93,6 +93,36 @@ Run a Harbor dataset against a locally served model on Beaker:
 See [`scripts/beaker/README.md`](scripts/beaker/README.md) for the full eval
 pipeline, flags, and troubleshooting.
 
+#### Evaluate manually
+
+To run an eval yourself on a node with GPUs (no Beaker), serve the model with
+vLLM and point Harbor at it:
+
+```bash
+# 1. serve the model on localhost:8008 (a separate shell/process)
+uvx vllm==0.19.1 serve allenai/tmax-9b \
+    --served-model-name tmax-9b \
+    --enable-auto-tool-choice --tool-call-parser qwen3_xml \
+    --tensor-parallel-size 8 --port 8008
+
+# set daytona key
+export DAYTONA_API_KEY='xxx'
+
+# 3. run a Harbor dataset against the local vLLM endpoint
+uv run harbor run \
+  --dataset terminal-bench@2.0 \
+  --env daytona \
+  --agent-import-path Vanillux2Agent:Vanillux2Agent \
+  --model openai/tmax-9b \
+  --agent-kwarg api_base=http://localhost:8008/v1 \
+  --agent-kwarg max_format_errors=64 \
+  --n-concurrent 16 \
+  -k 5 \
+  --job-name swerl-qwen32-2b-tmax-step100-vanillux2-daytona-tblite
+```
+
+Feel free to swap out daytona for your sandboxing backend of choice.
+
 ## Requirements
 
 - **[`uv`](https://github.com/astral-sh/uv)** for dependency management (deps pinned in `pyproject.toml` / `uv.lock`).
