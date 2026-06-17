@@ -22,8 +22,48 @@ MAX_OUTPUT_LENGTH = 50_000
 SUBMIT_MARKER = "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
 
 HARNESS_CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "sft" / "preprocessing" / "config"
-SYSTEM_PROMPT = (HARNESS_CONFIG_DIR / "system_prompt.txt").read_text().strip()
-TOOL_SCHEMAS = json.loads((HARNESS_CONFIG_DIR / "tool_schemas.json").read_text())
+_DEFAULT_SYSTEM_PROMPT = """You are a helpful coding assistant. You have access to a bash terminal.
+Use it to explore the codebase, understand the problem, implement a solution, and verify it works.
+
+IMPORTANT RULES:
+- Every response must include a THOUGHT section explaining your reasoning, followed by exactly one bash command.
+- Directory or environment variable changes are not persistent. Every command runs in a new subshell. Use `cd /path && <command>` to run commands in a specific directory.
+- Edit files using bash commands like `sed`, `cat > file << 'EOF'`, etc.
+- Long running commands: Wrap with `timeout`, e.g., `timeout 10 <command>`.
+- Interactive commands are not possible. Use `yes`/`no`, etc. as appropriate.
+- Output may be truncated. Use `head`/`tail`/`grep` to filter large outputs.
+- When you are confident your solution is correct, submit by running: `echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT`
+- After submitting you cannot continue working on the task.
+"""
+_DEFAULT_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Execute a bash command. Each command runs in a new subshell.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string", "description": "The bash command to execute."}},
+                "required": ["command"],
+            },
+        },
+    }
+]
+
+
+def _load_harness_config() -> tuple[str, list[dict[str, Any]]]:
+    """Load legacy SFT harness config, falling back to the checked-in tmax defaults."""
+    system_prompt_path = HARNESS_CONFIG_DIR / "system_prompt.txt"
+    tool_schemas_path = HARNESS_CONFIG_DIR / "tool_schemas.json"
+    if system_prompt_path.is_file() and tool_schemas_path.is_file():
+        return (
+            system_prompt_path.read_text(encoding="utf-8").strip(),
+            json.loads(tool_schemas_path.read_text(encoding="utf-8")),
+        )
+    return _DEFAULT_SYSTEM_PROMPT.strip(), _DEFAULT_TOOL_SCHEMAS
+
+
+SYSTEM_PROMPT, TOOL_SCHEMAS = _load_harness_config()
 
 # Max characters per log entry (full stdout/stderr from container); avoids huge files.
 _MAX_CMD_DEBUG_CHARS = 512_000
