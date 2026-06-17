@@ -21,6 +21,7 @@ if [ -z "$DOCKER_PAT" ]; then
     echo "ERROR: DOCKER_PAT is not set"
     exit 1
 fi
+# starts up podman
 source scripts/docker/docker_login.sh
 
 uv run python open_instruct/grpo_fast.py \

@@ -2,6 +2,10 @@
 
 These are the training launch scripts for the tmax fork (Qwen 3.5 + terminal agent training).
 
+I recommend starting with the 1 GPU RL debug script (`qwen35_2b_1gpu.sh`), and then scaling up to the full-size scripts.
+
+**important**: For people at ai2, you should run in beaker session with `BEAKER_ALLOW_SUBCONTAINERS=1` and `BEAKER_SKIP_DOCKER_SOCKET=1` set to avoid using beaker's own docker instance, which is not allowed.
+
 ## Scripts here
 
 Scripts are split into two folders by training stage:
@@ -19,6 +23,7 @@ Scripts are split into two folders by training stage:
 
 | Script | What it does |
 | --- | --- |
+| `qwen35_2b_1gpu.sh` | DPPO RL on Qwen3.5-2B with `swerl-tmax-15k` (1 GPU, for debugging) |
 | `qwen35_2b.sh` | DPPO RL on Qwen3.5-2B with `swerl-tmax-15k` |
 | `qwen35_4b.sh` | DPPO RL on Qwen3.5-4B with `swerl-tmax-15k` |
 | `qwen35_9b.sh` | DPPO RL on Qwen3.5-9B with `swerl-tmax-15k` |
