@@ -26,6 +26,6 @@ GPT-5-nano,closed,,11.5,2.3,leaderboard best
 Qwen3-8B,our_baseline,8,0.90,0.45,
 Qwen3.5-9B,our_baseline,9,21.12,2.60,daytona official
 Qwen3.6-27B,our_baseline,27,39.55,,
-TMax-27B,ours,27,43.0,,
+TMax-27B,ours,27,42.7,,
 Qwen3.5-4B,our_baseline,4,16.63,1.65,
 Qwen3.5-2B,our_baseline,2,2.3,1.00,

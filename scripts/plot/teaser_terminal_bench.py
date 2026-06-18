@@ -166,6 +166,9 @@ GROUP_ORDER: List[str] = ["ours", "our_baseline", "past_work", "open_weights", "
 #
 RECIPE: Dict[str, str] = {
     # SFT-only open recipes
+    "Nemotron-Terminal-8B":  "sft",
+    "Nemotron-Terminal-14B": "sft",
+    "Nemotron-Terminal-32B": "sft",
     "TerminalTraj-7B":       "sft",
     "TerminalTraj-14B":      "sft",
     "TerminalTraj-32B":      "sft",
@@ -371,8 +374,9 @@ class TeaserStyle:
 
     # Open-recipe highlight rings (colour encodes SFT vs RL)
     recipe_rings: bool = True
+    ring_recipes: Tuple[str, ...] = ("sft", "rl")   # which recipe kinds get a ring
     ring_lw: float = 2.4
-    ring_alpha: float = 0.95
+    ring_alpha: float = 0.6
     ring_logo_mult: float = 1.42   # ring diameter = logo target * logo_scale * this
     ring_dot_in: float = 0.165     # ring diameter (inches) for no-logo dot markers
 
@@ -613,7 +617,7 @@ def render(rows: List[Row], style: TeaserStyle, out_base: Path) -> None:
 
         # open-recipe ring (colour encodes SFT vs RL); drawn behind the marker
         recipe = RECIPE.get(row.model)
-        if style.recipe_rings and recipe is not None:
+        if style.recipe_rings and recipe in style.ring_recipes:
             if cfg["logo"]:
                 ring_in = style.logo_target_in * cfg["logo_scale"] * style.ring_logo_mult
             else:
@@ -673,7 +677,8 @@ def render(rows: List[Row], style: TeaserStyle, out_base: Path) -> None:
     if style.recipe_rings or style.pareto:
         handles = []
         if style.recipe_rings:
-            present = [k for k in RECIPE_ORDER if any(RECIPE.get(r.model) == k for r in rows)]
+            present = [k for k in RECIPE_ORDER if k in style.ring_recipes
+                       and any(RECIPE.get(r.model) == k for r in rows)]
             handles += [
                 Line2D([0], [0], marker="o", linestyle="none", markersize=12,
                        markerfacecolor="none", markeredgecolor=RECIPE_COLORS[k],

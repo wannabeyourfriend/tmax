@@ -15,7 +15,9 @@
 
 ---
 
-Todo: teaser figure
+<p align="center">
+  <img src="scripts/plot/output/teaser_terminal_bench.png" alt="Tmax" width="640">
+</p>
 
 Tmax is our project around training simple, powerful terminal using agents. This codebase covers data generation, training, and evaluation. Please refer to our [paper](https://arxiv.org/abs/xxx) for more details.
 
