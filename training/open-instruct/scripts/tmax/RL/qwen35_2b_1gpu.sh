@@ -25,7 +25,7 @@ fi
 source scripts/docker/docker_login.sh
 
 uv run python open_instruct/grpo_fast.py \
-    --dataset_mixer_list hamishivi/agent-task-openthoughts 1.0 \
+    --dataset_mixer_list allenai/open-instruct-openthoughts 1.0 \
     --dataset_mixer_list_splits train \
     --max_prompt_token_length 2048 \
     --per_turn_max_tokens 4096 \
@@ -60,7 +60,7 @@ uv run python open_instruct/grpo_fast.py \
     --save_traces \
     --save_trainer_logprobs false \
     --tools swerl_vanillux_sandbox \
-    --tool_configs '{"task_data_hf_repo": "hamishivi/agent-task-openthoughts", "test_timeout": 120, "image": "python:3.12-slim"}' \
+    --tool_configs '{"task_data_hf_repo": "allenai/open-instruct-openthoughts", "test_timeout": 120, "image": "python:3.12-slim"}' \
     --pool_size 16 \
     --max_steps 64 \
     --verification_reward 1.0 \

@@ -6,7 +6,7 @@ BEAKER_IMAGE="${1:-nathanl/open_instruct_auto}"
 
 echo "Using Beaker image: $BEAKER_IMAGE"
 
-DATASET=osieosie/tmax-sft-full-20260513
+DATASET=allenai/tmax-sft-big
 
 uv run python mason.py \
     --cluster ai2/jupiter \
@@ -38,25 +38,7 @@ uv run python mason.py \
     --warmup_ratio 0.03 \
     --weight_decay 0.0 \
     --num_train_epochs 2 \
-    --dataset_mixer_list \
-        $DATASET 1.0 \
-        $DATASET 1.0 \
-        $DATASET 1.0 \
-        $DATASET 1.0 \
-        $DATASET 1.0 \
-        $DATASET 1.0 \
-        $DATASET 1.0 \
-        $DATASET 1.0 \
-    --dataset_mixer_list_splits \
-        allenai__Sera_4.6_Lite_47000 \
-        m_a_p__TerminalTraj \
-        nvidia__Nemotron_Terminal_Corpus__dataset_adapters \
-        nvidia__Nemotron_Terminal_Corpus__skill_based_easy \
-        nvidia__Nemotron_Terminal_Corpus__skill_based_medium \
-        nvidia__Nemotron_Terminal_Corpus__skill_based_mixed \
-        open_thoughts__OpenThoughts_Agent_v1_SFT \
-        skill_tax_20260505_2.2k_combined_balanced_thinking_all \
-    --add_bos \
+    --dataset_mixer_list $DATASET 1.0 \
     --gradient_checkpointing \
     --report_to wandb \
     --with_tracking \

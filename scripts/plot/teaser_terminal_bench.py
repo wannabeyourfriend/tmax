@@ -88,6 +88,7 @@ darken_hex = _load_styles_module().darken_hex
 # rather than one, because that's where most models live and the labels need
 # breathing room.  Every other segment gets one unit.
 X_KNOTS: List[Tuple[float, float]] = [
+    (2.0, -1.0),
     (4.0, 0.0),
     (8.0, 1.0),
     (32.0, 3.0),     # <- stretched: 8B->32B spans 2 units for extra room
@@ -101,6 +102,7 @@ BREAK_X: float = 5.5          # where the // axis break is drawn
 
 # Where to draw x ticks and what to call them.
 X_TICKS: List[Tuple[float, str]] = [
+    (-1.0, "2B"),
     (0.0, "4B"),
     (1.0, "8B"),
     (2.0, "16B"),    # midpoint of the stretched 8B->32B segment (= exactly 16B)
@@ -109,7 +111,7 @@ X_TICKS: List[Tuple[float, str]] = [
     (5.0, "1T"),
     (UNKNOWN_X, "?"),
 ]
-X_LIM: Tuple[float, float] = (-0.5, 6.5)
+X_LIM: Tuple[float, float] = (-1.5, 6.5)
 
 
 def size_to_x(size: Optional[float]) -> float:
@@ -152,6 +154,44 @@ GROUP_ORDER: List[str] = ["ours", "our_baseline", "past_work", "open_weights", "
 
 
 # ===========================================================================
+# 2b. OPEN-RECIPE HIGHLIGHT  (ring around models whose full recipe is public)
+# ===========================================================================
+#
+# A subset of models publish their *full* training recipe.  We circle those
+# with a coloured ring whose colour encodes whether the recipe is SFT-only or
+# RL-based, so the reader can see at a glance which open recipes our RL approach
+# is being compared against.
+#
+#   recipe key in RECIPE -> "sft" | "rl"
+#
+RECIPE: Dict[str, str] = {
+    # SFT-only open recipes
+    "TerminalTraj-7B":       "sft",
+    "TerminalTraj-14B":      "sft",
+    "TerminalTraj-32B":      "sft",
+    "TermiGen-Qwen2.5-32B":  "sft",
+    "LiberCoder-32B":        "sft",
+    "LiberCoder-235B-A22B":  "sft",
+    # RL open recipes
+    "Endless-Terminals-8B":  "rl",
+    "OpenThinker-Agent-V1":  "rl",
+    "TMax-27B":              "rl",
+    "TMax-9B":               "rl",
+    "TMax-4B":               "rl",
+    "TMax-2B":               "rl",
+}
+RECIPE_COLORS: Dict[str, str] = {
+    "sft": "#4E6E94",   # denim
+    "rl":  "#C15F3C",   # terracotta (matches the hero / our RL approach)
+}
+RECIPE_LABELS: Dict[str, str] = {
+    "sft": "Open recipe (SFT)",
+    "rl":  "Open recipe (RL)",
+}
+RECIPE_ORDER: List[str] = ["sft", "rl"]
+
+
+# ===========================================================================
 # 3. PER-MODEL DISPLAY CONFIG  (hand-tune everything here)
 # ===========================================================================
 #
@@ -181,19 +221,25 @@ DEEPSEEK_LOGO = "deepseek-ai-icon-seeklogo.png"
 
 MODEL_STYLE: Dict[str, dict] = {
     # ---- ours (TMax) — the hero -------------------------------------------
+    "TMax-27B": dict(logo=OURS_LOGO, logo_scale=1.25, label="TMax-27B",
+                     dx=33, dy=2, ha="left", va="center"),
     "TMax-9B": dict(logo=OURS_LOGO, logo_scale=1.25, label="TMax-9B",
-                    dx=18, dy=2, ha="left", va="center"),
+                    dx=32, dy=2, ha="left", va="center"),
     "TMax-4B": dict(logo=OURS_LOGO, logo_scale=1.1, label="TMax-4B",
-                    dx=18, dy=2, ha="left", va="center"),
+                    dx=29, dy=2, ha="left", va="center"),
+    "TMax-2B": dict(logo=OURS_LOGO, logo_scale=0.92, label="TMax-2B",
+                    x_offset=0.0, dx=21, dy=13, ha="left", va="bottom"),
     # ---- our base models (Qwen) -------------------------------------------
-    "Qwen3.5-2B": dict(logo=QWEN_LOGO, logo_scale=0.75, label="Qwen3.5-2B",
-                       show=False, dx=14, dy=-2, ha="left", va="center"),
+    "Qwen3.5-2B": dict(logo=QWEN_LOGO, logo_scale=0.68, label="Qwen3.5-2B",
+                       x_offset=0.0, dx=16, dy=-2, ha="left", va="center"),
     "Qwen3.5-4B": dict(logo=QWEN_LOGO, logo_scale=0.85, label="Qwen3.5-4B",
                        dx=0, dy=-16, ha="center", va="top"),
     "Qwen3-8B": dict(logo=QWEN_LOGO, logo_scale=0.90, label="Qwen3-8B",
                      dx=15, dy=1, ha="left", va="center"),
     "Qwen3.5-9B": dict(logo=QWEN_LOGO, label="Qwen3.5-9B",
                        dx=0, dy=-22, ha="center", va="top"),
+    "Qwen3.6-27B": dict(logo=QWEN_LOGO, logo_scale=0.82, label="Qwen3.6-27B",
+                        x_offset=0.0, dx=-16, dy=-6, ha="right", va="top"),
     # ---- prior terminal agents --------------------------------------------
     "Nemotron-Terminal-8B": dict(logo=NVIDIA_LOGO, logo_scale=0.63, label="Nemotron-8B",
                                  dx=14, dy=0, ha="left", va="center"),
@@ -202,13 +248,15 @@ MODEL_STYLE: Dict[str, dict] = {
     "Nemotron-Terminal-32B": dict(logo=NVIDIA_LOGO, logo_scale=0.70, label="Nemotron-32B",
                                   dx=0, dy=15, ha="center", va="bottom"),
     "TermiGen-Qwen2.5-32B": dict(label="TermiGen-32B", leader=True,
-                                 dx=5, dy=-30, ha="left", va="top"),
+                                 dx=5, dy=-42, ha="left", va="top"),
     "Endless-Terminals-8B": dict(label="Endless-8B",
+                                 dx=14, dy=0, ha="left", va="center"),
+    "OpenThinker-Agent-V1": dict(label="OpenThinker-Agent-V1",
                                  dx=14, dy=0, ha="left", va="center"),
     "TerminalTraj-7B": dict(label="TerminalTraj-7B",
                             dx=0, dy=-7, ha="center", va="top"),
     "TerminalTraj-14B": dict(label="TerminalTraj-14B", leader=True,
-                             dx=0, dy=-33, ha="left", va="top"),
+                             dx=16, dy=-33, ha="left", va="top"),
     "TerminalTraj-32B": dict(label="TerminalTraj-32B",
                              dx=14, dy=0, ha="left", va="center"),
     "LiberCoder-32B": dict(label="LiberCoder-32B", leader=True,
@@ -221,7 +269,7 @@ MODEL_STYLE: Dict[str, dict] = {
     "Kimi-K2.5": dict(logo="Kimi-logo-2025.png", logo_scale=0.95, label="Kimi-K2.5",
                       dx=18, dy=0, ha="left", va="center"),
     "MiniMax-M2.7": dict(logo="minimax-logo.png", logo_scale=1.0, label="MiniMax-M2.7",
-                         dx=0, dy=-16, ha="center", va="top"),
+                         dx=-12, dy=-16, ha="center", va="top"),
     "DeepSeek-V3.2": dict(logo=DEEPSEEK_LOGO, logo_scale=1.0, label="DeepSeek-V3.2",
                           dx=0, dy=-20, ha="center", va="top"),
     "GLM-5": dict(logo="GLM-Zai-Logo.png", logo_scale=0.82, label="GLM-5",
@@ -274,12 +322,12 @@ class TeaserStyle:
     # Typography
     font_family: str = "serif"
     font_serif: Sequence[str] = field(default_factory=lambda: ["DejaVu Serif"])
-    font_size: float = 14.0
-    axes_label_size: float = 16.0
-    tick_size: float = 14.0
-    annotation_size: float = 10.5
-    annotation_size_ours: float = 12.5
-    legend_size: float = 12.0
+    font_size: float = 16.0
+    axes_label_size: float = 18.5
+    tick_size: float = 16.0
+    annotation_size: float = 12.5
+    annotation_size_ours: float = 14.5
+    legend_size: float = 13.5
 
     # Layout / spines
     figsize: Tuple[float, float] = (14.0, 7.0)
@@ -315,11 +363,32 @@ class TeaserStyle:
     annotation_color: str = "#4A433B"   # label text colour (non-ours)
 
     # Error bars (vertical, ± std from the CSV)
-    show_errorbars: bool = True
+    show_errorbars: bool = False
     errorbar_alpha: float = 0.5
     errorbar_lw: float = 1.3
     errorbar_capsize: float = 3.0
     errorbar_color: str = "#7A7065"     # neutral so it doesn't fight the logos
+
+    # Open-recipe highlight rings (colour encodes SFT vs RL)
+    recipe_rings: bool = True
+    ring_lw: float = 2.4
+    ring_alpha: float = 0.95
+    ring_logo_mult: float = 1.42   # ring diameter = logo target * logo_scale * this
+    ring_dot_in: float = 0.165     # ring diameter (inches) for no-logo dot markers
+
+    # Pareto frontier: the upper-left envelope across *all* size-disclosed models
+    # (smaller is better, higher is better).  A soft band hugs the *upper* side of
+    # the line so the frontier reads as a clean ridge rather than a heavy block.
+    pareto: bool = True
+    pareto_color: str = "#C15F3C"       # fill tint
+    pareto_fill_alpha: float = 0.10     # whole region above the line is shaded
+    pareto_line_color: str = "#E0A78F"  # lighter, so it doesn't fight the labels
+    pareto_line_alpha: float = 0.85
+    pareto_lw: float = 2.0
+    pareto_line_style: Tuple = (0, (7, 4))  # dashed
+    pareto_label: str = ""              # floating on-plot label (legend note instead)
+    pareto_label_xy: Tuple[float, float] = (2.15, 33.5)
+    pareto_legend_label: str = "Pareto frontier"
 
     # "Very large / undisclosed size" overlay band (right side)
     frontier_band: bool = True
@@ -444,6 +513,61 @@ def _draw_x_break(ax, style: TeaserStyle) -> None:
                 lw=style.spine_linewidth, clip_on=False, zorder=12)
 
 
+def _pareto_front(rows: List[Row]) -> List[Row]:
+    """Return the Pareto-optimal rows (minimise size, maximise score).
+
+    A model is on the frontier if no other model is both *no larger* and
+    *higher-scoring*.  Closed models have no disclosed size but live in the
+    far-right "very large / undisclosed" column, so we treat their size as the
+    largest tier (+inf) — the best of them therefore caps the frontier.
+    Computed as the running-max score while sweeping from smallest to largest.
+    """
+    # smallest size first; undisclosed size sorts last; ties broken by score
+    ordered = sorted(rows, key=lambda r: (r.size_b if r.size_b is not None else np.inf,
+                                          -r.tb2))
+    front: List[Row] = []
+    best = -np.inf
+    for r in ordered:
+        if r.tb2 > best:
+            front.append(r)
+            best = r.tb2
+    return front
+
+
+def _draw_pareto(ax, rows: List[Row], style: TeaserStyle) -> List[str]:
+    """Draw the Pareto frontier line + a soft band on its upper side.
+
+    Returns the set of model names on the frontier so the render loop can give
+    them a subtle frontier ring.
+    """
+    front = _pareto_front(rows)
+    if len(front) < 2:
+        return []
+
+    fx = [r.x for r in front]
+    fy = [r.tb2 for r in front]
+
+    # Shade the WHOLE region above the frontier.  The boundary starts at the
+    # bottom-left origin, rises through the frontier points, then runs flat to
+    # the right edge so the fill spans the full width up to the top.
+    fill_x = [X_LIM[0]] + fx + [X_LIM[1]]
+    fill_lo = [0.0] + fy + [fy[-1]]
+    ax.fill_between(fill_x, fill_lo, style.ylim[1], color=style.pareto_color,
+                    alpha=style.pareto_fill_alpha, linewidth=0, zorder=1)
+    # The line spans the full plot: from the bottom-left origin, through the
+    # frontier points, then flat to the right edge of the figure.
+    line_x = [X_LIM[0]] + fx + [X_LIM[1]]
+    line_y = [0.0] + fy + [fy[-1]]
+    ax.plot(line_x, line_y, color=style.pareto_line_color, lw=style.pareto_lw,
+            alpha=style.pareto_line_alpha, linestyle=style.pareto_line_style,
+            solid_capstyle="round", dash_capstyle="round", zorder=1.6)
+    if style.pareto_label:
+        ax.text(*style.pareto_label_xy, style.pareto_label, ha="center", va="center",
+                fontsize=style.annotation_size, color=darken_hex(style.pareto_color, 0.9),
+                style="italic", fontweight="bold", alpha=0.95, zorder=1.7)
+    return [r.model for r in front]
+
+
 def render(rows: List[Row], style: TeaserStyle, out_base: Path) -> None:
     _apply_rc(style)
     fig, ax = plt.subplots(figsize=style.figsize)
@@ -466,6 +590,9 @@ def render(rows: List[Row], style: TeaserStyle, out_base: Path) -> None:
         ax.spines[side].set_color(style.spine_color)
         ax.spines[side].set_linewidth(style.spine_linewidth)
 
+    if style.pareto:
+        _draw_pareto(ax, rows, style)  # noqa: returns frontier names (unused)
+
     for row in rows:
         cfg = style_for(row.model)
         if not cfg["show"]:
@@ -483,6 +610,18 @@ def render(rows: List[Row], style: TeaserStyle, out_base: Path) -> None:
         if is_ours and style.ours_halo:
             ax.scatter([x], [y], s=style.ours_halo_size, color=GROUP_COLORS["ours"],
                        alpha=style.ours_halo_alpha, edgecolors="none", zorder=3)
+
+        # open-recipe ring (colour encodes SFT vs RL); drawn behind the marker
+        recipe = RECIPE.get(row.model)
+        if style.recipe_rings and recipe is not None:
+            if cfg["logo"]:
+                ring_in = style.logo_target_in * cfg["logo_scale"] * style.ring_logo_mult
+            else:
+                ring_in = style.ring_dot_in
+            ring_s = (ring_in * 72.0) ** 2
+            ax.scatter([x], [y], s=ring_s, facecolors="none",
+                       edgecolors=RECIPE_COLORS[recipe], linewidths=style.ring_lw,
+                       alpha=style.ring_alpha, zorder=4)
 
         # marker: logo centred on the exact point, else a coloured dot
         if cfg["logo"]:
@@ -529,6 +668,27 @@ def render(rows: List[Row], style: TeaserStyle, out_base: Path) -> None:
         ax.legend(handles=handles, loc=style.legend_loc, bbox_to_anchor=style.legend_bbox,
                   frameon=False, fontsize=style.legend_size, handletextpad=0.4,
                   labelspacing=0.6, borderaxespad=0.0)
+
+    # recipe-ring legend (open recipe: SFT vs RL) + Pareto-frontier note
+    if style.recipe_rings or style.pareto:
+        handles = []
+        if style.recipe_rings:
+            present = [k for k in RECIPE_ORDER if any(RECIPE.get(r.model) == k for r in rows)]
+            handles += [
+                Line2D([0], [0], marker="o", linestyle="none", markersize=12,
+                       markerfacecolor="none", markeredgecolor=RECIPE_COLORS[k],
+                       markeredgewidth=style.ring_lw, label=RECIPE_LABELS[k])
+                for k in present
+            ]
+        if style.pareto:
+            handles.append(
+                Line2D([0], [0], color=style.pareto_line_color, lw=style.pareto_lw,
+                       linestyle=style.pareto_line_style, dash_capstyle="round",
+                       label=style.pareto_legend_label)
+            )
+        ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(0.01, 0.99),
+                  frameon=False, fontsize=style.legend_size, handletextpad=0.6,
+                  labelspacing=0.7, borderaxespad=0.0)
 
     # axes cosmetics
     ax.set_xlim(*X_LIM)
