@@ -16,7 +16,7 @@
 ---
 
 Tmax is our project around training simple, powerful terminal using agents. This codebase covers data generation, training, and evaluation.
-We use this to train our 'tmax' series of models, with strong performance as shown below! Please refer to our [paper](https://arxiv.org/abs/xxx) for more details.
+We use this to train our 'tmax' series of models, with strong performance as shown below! Please refer to our [paper](https://github.com/hamishivi/tmax/blob/master/assets/paper.pdf) for more details.
 
 
 <p align="center">
@@ -27,7 +27,7 @@ We use this to train our 'tmax' series of models, with strong performance as sho
 Below, we give a quick overview of the codebase and how to use it.
 
 ### News
-- Initial release of the codebase and models! Please read [our paper](https://arxiv.org/abs/xxx) for more details.
+- Initial release of the codebase and models! Please read [our paper](https://github.com/hamishivi/tmax/blob/master/assets/paper.pdf) for more details.
 
 
 
