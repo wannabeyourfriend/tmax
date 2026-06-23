@@ -9,14 +9,14 @@
 <p align="center">
   💻 <a href="https://github.com/hamishivi/tmax">Code</a> ·
   🤗 <a href="https://huggingface.co/collections/allenai/tmax">Models &amp; Data</a> ·
-  📜 <a href="https://github.com/hamishivi/tmax/blob/master/assets/paper.pdf">Paper</a> ·
+  📜 <a href="https://arxiv.org/abs/2606.23321">Paper</a> ·
   📓 <a href="https://wai-org.com/blog/tmax/">Blog</a>
 </p>
 
 ---
 
 Tmax is our project around training simple, powerful terminal using agents. This codebase covers data generation, training, and evaluation.
-We use this to train our 'tmax' series of models, with strong performance as shown below! Please refer to our [paper](https://github.com/hamishivi/tmax/blob/master/assets/paper.pdf) for more details.
+We use this to train our 'tmax' series of models, with strong performance as shown below! Please refer to our [paper](https://arxiv.org/abs/2606.23321) for more details.
 
 
 <p align="center">
@@ -27,7 +27,7 @@ We use this to train our 'tmax' series of models, with strong performance as sho
 Below, we give a quick overview of the codebase and how to use it.
 
 ### News
-- Initial release of the codebase and models! Please read [our paper](https://github.com/hamishivi/tmax/blob/master/assets/paper.pdf) for more details.
+- Initial release of the codebase and models! Please read [our paper](https://arxiv.org/abs/2606.23321) for more details.
 
 
 
@@ -179,9 +179,13 @@ This codebase is licensed under Apache 2.0 as given in [LICENSE](LICENSE).
 If you use this codebase or models in your research, please cite our paper:
 
 ```bibtex
-@misc{ivison2026tmax,
-  title={{TMAX}: A Simple Recipe for Terminal Agents},
-  author={Ivison, Hamish and Yin, Junjie Oscar and Shao, Rulin and Xiao, Teng and Lambert, Nathan and Hajishirzi, Hannaneh},
-  year={2026},
+@misc{ivison2026tmaxsimplerecipeterminal,
+      title={Tmax: A simple recipe for terminal agents}, 
+      author={Hamish Ivison and Junjie Oscar Yin and Rulin Shao and Teng Xiao and Nathan Lambert and Hannaneh Hajishirzi},
+      year={2026},
+      eprint={2606.23321},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2606.23321}, 
 }
 ```
